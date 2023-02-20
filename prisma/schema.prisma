@@ -1,0 +1,83 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Admin {
+  id       Int       @id @default(autoincrement())
+  username String    @unique
+  password String
+  Process  Process[]
+}
+
+model User {
+  id                String         @id @unique
+  name              String
+  username          String         @unique
+  avatar            String
+  timerPreserved    Boolean        @default(false)
+  timerLastDuration Int            @default(0)
+  timerId           String?
+  balance           Int            @default(335)
+  spins             Int            @default(0)
+  vcn               String?
+  fortuneItems      FortuneItem[]
+  twitterTokens     TwitterToken[]
+  processes         Process[]
+  withdraw          Int            @default(0)
+  ready             Boolean        @default(false)
+}
+
+model TwitterToken {
+  id           Int      @id @default(autoincrement())
+  tokenType    String
+  expiresIn    Int
+  accessToken  String
+  refreshToken String
+  scope        String
+  timestamp    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id])
+  userId       String
+}
+
+enum ProcessClass {
+  PRIMARY
+  SECONDARY
+}
+
+model Process {
+  id        Int          @id @default(autoincrement())
+  type      String
+  class     ProcessClass
+  timestamp DateTime     @default(now())
+  data      Json?
+  user      User?        @relation(fields: [userId], references: [id])
+  userId    String?
+  admin     Admin?       @relation(fields: [adminId], references: [id])
+  adminId   Int?
+}
+
+enum FortuneClass {
+  T
+  S
+  J
+  N
+}
+
+model FortuneItem {
+  id        Int          @id @default(autoincrement())
+  title     String
+  bgcolor   String       @default("black")
+  fgcolor   String       @default("white")
+  class     FortuneClass
+  arguments String?
+  user      User         @relation(fields: [userId], references: [id])
+  userId    String
+}

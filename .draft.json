@@ -1,0 +1,25 @@
+[
+  {
+    "id": "",
+    "name": "",
+    "username": "",
+    "avatar": "",
+    "timerPreserved": true,
+    "timerLastDuration": 10,
+    "timerId": 10,
+    "balance": 100,
+    "vcn": "+201010398442"
+  },
+  {
+    "access_token": "",
+    "refresh_token": "",
+    "expires_in": ""
+  },
+  [
+    {
+      "type": "",
+      "timestamp": "",
+      "data": ""
+    }
+  ]
+]

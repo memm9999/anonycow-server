@@ -1,11 +1,85 @@
-export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready']
+import Queue from "bull";
+import {Socket} from "socket.io";
+import session, {Session} from "express-session";
+import crypto from "crypto";
+
+export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready', 'fortuneOrder', 'totalProcesses']
 
 export class SessionManager {
-    constructor(prisma, io = undefined, session = undefined, socket = undefined) {
+    constructor(prisma, io = undefined, attachment) {
         this.prisma = prisma
-        this.session = session
-        this.socket = socket
+        // this.session = session
+        // this.sessionId = sessionId
+        // this.socket = socket
+        switch (true) {
+            case attachment instanceof Socket:
+                this.setSocket(attachment)
+                break;
+
+            case attachment instanceof Session:
+                this.setSession(attachment)
+                break;
+        }
+        // this.socketId = this.socket.id || socketId
         this.io = io
+        // this._sessionEditQueue = new Queue('sessionEdit')
+        // // console.log(this.sessionID)
+        // console.log(this.sessionId)
+
+        // try {
+        //     console.log(">>> Registering process <<<")
+        //     this._sessionEditQueue.process((job, done) => {
+        //
+        //         const obj = job.data.obj
+        //         console.log(">>> triggered <<<")
+        //
+        //         // if(job.data.value) {
+        //         //     this.session[job.data.key] = job.data.value
+        //         // } else {
+        //         //     delete this.session[job.data.key]
+        //         // }
+        //
+        //         try {
+        //             // this.session.reload(()=>{
+        //             //     this.session[job.data.key] = job.data.value
+        //             //     this.session.save()
+        //             // })
+        //             for(const key in obj) {
+        //                 console.log(key, obj[key])
+        //                 if(obj[key]) {
+        //                     this.session[key] = obj[key]
+        //                     // Object.defineProperty(
+        //                     //     this.session,
+        //                     //     key,
+        //                     //     {
+        //                     //         value: obj[key],
+        //                     //         writable: true
+        //                     //     }
+        //                     // )
+        //                 } else {
+        //                     // try {
+        //                     console.log(`>>> ${key} is deleted <<<`)
+        //                     delete this.session[key]
+        //                     // } catch (e) {}
+        //                 }
+        //             }
+        //
+        //             this.session.save()
+        //
+        //             // this.session.reload(()=>{
+        //             //     this.session.save()
+        //             // })
+        //
+        //             console.log(this.session)
+        //
+        //         } catch (e) {
+        //             console.log(e)
+        //         }
+        //
+        //         done()
+        //     })
+        // } catch (e) {}
+
         this.ioEventHandler.bind(this)
     }
 
@@ -16,6 +90,7 @@ export class SessionManager {
             "pts:confirm",
             "pts:withdraw",
             "fortune:edit",
+            "fortune:add",
             "spins:modify",
             "timer:ready",
             "timer:set",
@@ -33,6 +108,9 @@ export class SessionManager {
             "vcn:save",
             "fortune:spin",
             "fortune:confirm",
+            "fortune:prizes",
+            "activities:list",
+            "activities:count",
             "client:log",
             "admin:get",
             "admin:select"
@@ -51,7 +129,87 @@ export class SessionManager {
 
     static _initUserId = "anonymous"
 
-    static init = async (prisma) => {
+    static init = async (prisma, app, io) => {
+
+        app.post('/api/pin', async (req, res) => {
+            const manager = new SessionManager(prisma, io, req.session)
+
+            const id = req.body?.id
+
+            if(id) {
+                const pin = await manager.getData(
+                    manager.prisma.pin,
+                    {
+                        id: id
+                    }
+                )
+
+                const obj = pin?.data?.obj
+                const redirect = pin?.data?.redirect
+
+                if(pin?.id) {
+                    for(const key in obj) {
+                        if(obj[key]) {
+                            req.session[key] = obj[key]
+                        } else {
+                            delete req.session[key]
+                        }
+                    }
+                }
+
+                // req.session.reload((err)=>{
+                //     console.log(err)
+                //
+                //     // req.session.save()
+                // })
+
+                // req.session.reload((err)=>{
+                //
+                //     if(pin?.id) {
+                //         for(const key in obj) {
+                //             if(obj[key]) {
+                //                 req.session[key] = obj[key]
+                //             } else {
+                //                 delete req.session[key]
+                //             }
+                //         }
+                //     }
+                //
+                //     req.session.save()
+                //     console.log(err)
+                // })
+
+                // req.session.reload((err)=>{
+                //     console.log(err)
+                //     console.log("Hello")
+                // })
+
+                // req.session.save()
+                // req.session.reload(()=>{})
+
+                // req.session.reload(()=>{
+                //     req.session.save()
+                // })
+
+                if(redirect) {
+                    res.json({
+                        redirect: redirect
+                    })
+                } else {
+                    res.json({
+                        redirect: null
+                    })
+                }
+
+            } else {
+                res.json({
+                    redirect: null
+                })
+            }
+
+
+        })
+
         if (!await prisma.user.findUnique({
             where: {
                 id: SessionManager._initUserId
@@ -70,27 +228,39 @@ export class SessionManager {
 
     static _specifyKeys = (props) => {
         return o => {
-            try {
-                return props.reduce((a, e) => ({...a, [e]: o[e]}), {})
-            } catch (e) {
-                console.log(e)
+            if(o) {
+                try {
+                    return props.reduce((a, e) => ({...a, [e]: o[e]}), {})
+                } catch (e) {
+                    console.log(e)
+                }
+            } else {
+                return {}
             }
         };
     }
 
-    static _broadcastUserEvents = (manager) => ({
+    static _broadcastUserEvents = {
         "user:get": {
-            filter: (userObj) => {
-                // console.log(`>>> The condition: ${userObj && manager.session?.userLoggedIn}`)
-                // console.log(`>>> The timerLastDuration: ${userObj?.timerLastDuration}`)
-                // console.log(`>>> The userLoggedIn: ${manager.session?.userLoggedIn}`)
-                return (userObj && manager.session?.userLoggedIn) ? SessionManager._specifyKeys(FRONTEND_USER_KEYS)(userObj) : {}
-            }
+            filter: SessionManager._specifyKeys(FRONTEND_USER_KEYS)
         },
         "admin:select": {
-            filter: (userObj) => userObj ? SessionManager._specifyKeys(FRONTEND_USER_KEYS.concat(["spins"]))(userObj) : {}
+            filter: SessionManager._specifyKeys(FRONTEND_USER_KEYS.concat(["spins"]))
+        },
+        "activities:count": {
+            filter: async (userObj, manager) => {
+                const _data = await manager.prisma.process.count({
+                    where: {
+                        userId: {
+                            equals: userObj?.id
+                        }
+                    }
+                })
+
+                return _data
+            }
         }
-    })
+    }
 
     setIO = (io) => {
         this.io = io
@@ -105,63 +275,219 @@ export class SessionManager {
         this.session = session
     }
 
-    createData = async (model, data, include) => {
-        return await model.create({
+    /*
+    * CRUD operations
+    * */
+
+    createData = (model, data, include) => {
+        return model.create({
             data: data,
             include: include
         })
     }
 
-    updateData = (model, id, dataObj, include) => new Promise(async (resolve) => {
-        const data = await model.update({
+    updateData = (model, id, dataObj, include) => {
+        return model.update({
             where: {
                 id: id
             },
             data: dataObj,
             include: include
         })
-
-        resolve(data)
-    })
-
-    updateInSession = (obj) => new Promise((resolve) => {
-        for(const key in obj) {
-            this.session[key] = obj[key]
-        }
-
-        this.session.reload(() => {
-            this.session.save()
-        })
-
-        resolve(this.session)
-    })
-
-    getData = async (model, obj, include) => {
-        // console.log(obj)
-        try {
-            return await model.findUnique({
-                where: obj,
-                include: include
-            })
-        } catch (e) {
-            // console.log(e)
-        }
     }
 
-    createUser = (data, include) => {
+    getData = (model, obj, include) => {
+        // console.log(obj)
+        return model.findUnique({
+            where: obj,
+            include: include
+        })
+    }
+
+    /*
+    * Session-related operations
+    * */
+
+    updateInSession = (obj, redirect=null, via='io') => new Promise(async (resolve) => {
+        const pinData = {
+            obj: obj,
+            redirect: redirect
+        }
+
+        const pin = await this.createData(
+            this.prisma.pin,
+            {
+                id: crypto.createHash('sha1').update(JSON.stringify(pinData) + crypto.randomBytes(32).toString('hex')).digest('hex'),
+                data: pinData
+            }
+        )
+
+        switch (via) {
+            case 'io':
+                this.io.to(this.socket?.id).emit("pin", pin?.id)
+                break;
+
+            default:
+                if(via?.redirect) {
+                    via?.redirect?.(`/pin/${pin?.id}`)
+                }
+                break;
+        }
+
+        resolve(pin?.id)
+    })
+
+    // updateInSession = (obj) => {
+    //     for(const key in obj) {
+    //         if(obj[key]) {
+    //             this.session[key] = obj[key]
+    //         } else {
+    //             delete this.session[key]
+    //         }
+    //     }
+    //
+    //     this.session.reload(() => {
+    //         this.session.save()
+    //     })
+    //
+    //     return Promise.resolve(this.session)
+    // }
+
+    /*
+    * User-related operations
+    * */
+
+    createUser = (data, include={
+        fortuneItems: true,
+        // _count: {
+        //     select: {
+        //         processes: true
+        //     }
+        // }
+    }) => {
         return this.createData(this.prisma.user, data, include)
     }
 
-    getUser = (id, include) => {
-        return this.getData(this.prisma.user, {
-            id: id
-        }, include)
+    getUser = (id, include={
+        fortuneItems: true,
+        // _count: {
+        //     select: {
+        //         processes: true
+        //     }
+        // }
+    }) => {
+        if(id) {
+            return this.getData(this.prisma.user, {
+                id: id
+            }, include)
+        }
+
+        return null
     }
 
-    getUserByUsername = (username, include) => {
-        return this.getData(this.prisma.user, {
-            username: username
-        }, include)
+    updateUser = (id, data, include={
+        fortuneItems: true,
+        // _count: {
+        //     select: {
+        //         processes: true
+        //     }
+        // }
+    }) => {
+        if(id && data) {
+            return this.updateData(this.prisma.user, id, data, include)
+        }
+
+        return null
+    }
+
+    getUserByUsername = (username, include={
+        fortuneItems: true,
+        // _count: {
+        //     select: {
+        //         processes: true
+        //     }
+        // }
+    }) => {
+        if(username) {
+            return this.getData(this.prisma.user, {
+                username: username
+            }, include)
+        }
+
+        return null
+    }
+
+    /*
+    * SocketIO-related operations
+    * */
+
+    ioBroadcastUser = async (id = this.session?.userId, data=null, events = SessionManager._broadcastUserEvents) => {
+
+        // const processesCount = await this.prisma.process.count({
+        //     where: {
+        //         userId: {
+        //             equals: id
+        //         }
+        //     }
+        // })
+
+        // console.log('>>> Broadcasting:')
+        let _data;
+
+        if(data) {
+            _data = data
+        } else {
+            _data = await this.getUser(id)
+        }
+
+        // _data = {
+        //     ..._data,
+        //     // totalProcesses: _data?._count?.processes
+        //     // totalProcesses: processesCount
+        // }
+
+        for (const event in events) {
+
+            // console.log(event)
+            // console.log(_data)
+
+            this.io.to(id || this.socket.id).emit(
+                event,
+                events[event].filter(
+                    _data,
+                    this
+                )
+            )
+
+        }
+
+        return Promise.resolve(_data)
+
+    }
+
+    // ioBroadcastProcessesCount = async (id = this.session?.selectedUserId || this.session?.userId) => {
+    //     const _data = await this.prisma.process.count({
+    //         where: {
+    //             userId: {
+    //                 equals: id
+    //             }
+    //         }
+    //     })
+    //
+    //     if(id) {
+    //         this.io.to(id).emit(
+    //             "activities:count",
+    //             _data
+    //         )
+    //     }
+    //
+    //     return Promise.resolve(_data)
+    // }
+
+    ioUpdateUser = async (id, data, events=SessionManager._broadcastUserEvents) => {
+        const _data = await this.updateUser(id, data)
+        // this.ioBroadcastProcessesCount(id)
+        return this.ioBroadcastUser(id, _data, events)
     }
 
     saveProcessRecord = async (
@@ -193,167 +519,63 @@ export class SessionManager {
                 }
             }
 
-            return await this.createData(this.prisma.process, dataObj)
+            const _data = await this.createData(this.prisma.process, dataObj)
+
+            return _data
         }
 
     }
 
-    ioBroadcastUser = async (id = this.session?.userId, data=null, events = SessionManager._broadcastUserEvents(this)) => {
+    ioEventHandler = function (action, handler, admin = false) {
+        let _handler;
 
-        // console.log(data)
+        // this.session.reload((err)=>{
+        //     console.log(err)
+        //     console.log("Hello")
+        // })
 
-        for (const event in events) {
+        if(handler.constructor.name === 'AsyncFunction') {
+            _handler = async function () {
+                /*
+                * Returns: Process object for a later usage
+                * */
 
-            this.io.to(id || this.socket.id).emit(
-                event,
-                events[event].filter(
-                    data ||
-                    await this.getUser(
-                        id, {
-                            fortuneItems: true
-                        }
-                    )
-                )
-            )
-
-        }
-
-    }
-
-    // ioBroadcastUser = async (id, light = false, events = {
-    //     "user:get": {
-    //         filter: (userObj) => SessionManager._specifyKeys(FRONTEND_USER_KEYS)(userObj)
-    //             // this.session?.userLoggedIn ? SessionManager._specifyKeys(FRONTEND_USER_KEYS)(userObj) : {}
-    //     },
-    //     "admin:select": {
-    //         filter: (userObj) => this.session?.selectedUser?.id === userObj?.id ? SessionManager._specifyKeys(FRONTEND_USER_KEYS.concat(["spins"]))(userObj) : {}
-    //     }
-    // }) => {
-    //     // console.log(id)
-    //
-    //     if (id === SessionManager._initUserId) {
-    //         this.io.to(this.socket.id).emit("user:get", {})
-    //     } else {
-    //         for (const event in events) {
-    //
-    //             this.io.to(id).emit(
-    //                 event,
-    //                 events[event].filter(
-    //                     light ?
-    //                         this.session?.user :
-    //                         await this.getUser(
-    //                             id, {
-    //                                 fortuneItems: true
-    //                             }
-    //                         )
-    //                 )
-    //             )
-    //
-    //         }
-    //     }
-    // }
-
-    // ioLightUpdateUser = (id, data, admin = false) => new Promise(async (resolve) => {
-    //     const dataObj = data ?
-    //         await this.updateData(this.prisma.user, id, data, {
-    //             fortuneItems: true
-    //         }) :
-    //         this.session?.user
-    //
-    //     if (id && id !== SessionManager._initUserId) {
-    //         if (this.session?.selectedUser) {
-    //             await this.updateInSession(
-    //                 "selectedUser",
-    //                 dataObj
-    //             )
-    //         }
-    //
-    //         if (this.session?.user) {
-    //             this.updateInSession(
-    //                 "user",
-    //                 dataObj
-    //             ).then((session) => {
-    //                 resolve(session)
-    //             })
-    //         }
-    //     } else {
-    //         resolve(this.session)
-    //     }
-    //
-    //     await this.ioBroadcastUser(id, true, admin)
-    // })
-
-    ioUpdateUser = (id, data) => new Promise(async (resolve) => {
-        await this.updateData(this.prisma.user, id, data, {
-            fortuneItems: true
-        }).then(
-            (data) => {
-                this.ioBroadcastUser(id, data)
-                resolve(data)
-            }
-        )
-    })
-
-    // ioUpdateUser = (id = this.session?.user?.id || SessionManager._initUserId, data, light = false) => new Promise(async (resolve) => {
-    //     const dataObj = data ?
-    //         await this.updateData(this.prisma.user, id, data, {
-    //             fortuneItems: true
-    //         }) :
-    //         light ?
-    //             this.session?.user:
-    //             await this.getData(this.prisma.user, {
-    //                     id: id
-    //                 }, {
-    //                     fortuneItems: true
-    //                 }
-    //             )
-    //
-    //     if (id && id !== SessionManager._initUserId) {
-    //         this.updateInSession(
-    //             "user",
-    //             dataObj
-    //         ).then((session) => {
-    //             resolve(session)
-    //         })
-    //     } else {
-    //         resolve(this.session)
-    //     }
-    //
-    //     await this.ioBroadcastUser(id, light)
-    // })
-
-    ioEventHandler = async function (action, handler, admin = false) {
-        // return async () => await this.saveProcessRecord(action, handler())
-        const params = Array(handler.length).fill(null).map((v, i) => "p" + i)
-
-        const AsyncFunction = async function () {
-        }.constructor;
-
-        const _handler = new AsyncFunction(
-            ...params,
-            `
-            const [[action, handler, admin], SessionManager, ...innerArgs] = arguments
-            if(admin) {
-                this.io.to(this.socket.id).emit('admin:get', this.session?.admin ? SessionManager._specifyKeys(['username'])(this.session?.admin) : {})
-                if(this.session?.admin?.id) {
-                    return this.saveProcessRecord(action, await handler(...innerArgs))
+                if(admin) {
+                    this.io.to(this.socket.id).emit('admin:get', this.session?.admin ? SessionManager._specifyKeys(['username'])(this.session?.admin) : {})
+                    if(!this.session?.admin?.id) {
+                        return undefined
+                    }
                 }
-            } else if(!admin) {
-                return this.saveProcessRecord(action, await handler(...innerArgs))
+
+                return this.saveProcessRecord(action, await handler(...arguments))
             }
-            `
-        )
+        } else {
+            _handler = function () {
+                /*
+                * Returns: Process object for a later usage
+                * */
 
-        return _handler.bind.bind(_handler)(this, arguments, SessionManager)
+                if(admin) {
+                    this.io.to(this.socket.id).emit('admin:get', this.session?.admin ? SessionManager._specifyKeys(['username'])(this.session?.admin) : {})
+                    if(!this.session?.admin?.id) {
+                        return undefined
+                    }
+                }
+
+                return this.saveProcessRecord(action, handler(...arguments))
+            }
+        }
+
+        return _handler.bind.bind(_handler)(this)
     }
 
 
-    ioOn = async (action, handler) => {
-        this.socket.on(action, await this.ioEventHandler(action, handler))
+    ioOn = (action, handler) => {
+        this.socket.on(action, this.ioEventHandler(action, handler))
     }
 
-    ioAdminOn = async (action, handler) => {
-        this.socket.on(action, await this.ioEventHandler(action, handler, true))
+    ioAdminOn = (action, handler) => {
+        this.socket.on(action, this.ioEventHandler(action, handler, true))
     }
 
 }

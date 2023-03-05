@@ -1,7 +1,8 @@
 import express from "express";
 import {createServer} from "http";
 import {Server, Socket} from "socket.io";
-import session, {Session} from "express-session";
+// import session from "express-session";
+import {Session} from "./controllers/session/session.js";
 import got from "got";
 import {Buffer} from "node:buffer"
 import cors from "cors"
@@ -27,7 +28,7 @@ const FORTUNE_DICTIONARY = {
         manager.ioUpdateUser(
             user.id,
             {
-                balance: user.balance * times
+                balance: parseInt(user.balance * times)
             }
         ).then(user => {
             manager.saveProcessRecord(
@@ -45,7 +46,7 @@ const FORTUNE_DICTIONARY = {
         manager.ioUpdateUser(
             user.id,
             {
-                spins: user.spins + n
+                spins: parseInt(user.spins + n)
             }
         ).then(user => {
             manager.saveProcessRecord(
@@ -59,36 +60,12 @@ const FORTUNE_DICTIONARY = {
             )
         })
     },
-    J: (manager, user, arg) => {
-    },
-    N: (manager, user, arg) => {
-    }
+    J: (manager, user, arg) => {},
+    N: (manager, user, arg) => {}
 }
 
 const app = express();
 const httpServer = createServer(app);
-const RedisStore = connectRedis(session)
-const redisClient = redis.createClient({
-    legacyMode: true
-})
-
-await redisClient.connect()
-
-redisClient.on('error', function (err) {
-    console.log('Could not establish a connection with redis. ' + err);
-});
-redisClient.on('connect', function (err) {
-    console.log('Connected to redis successfully');
-});
-
-const sessionMiddleware = session({
-    secret: 'secret',
-    saveUninitialized: false,
-    resave: false,
-    // unset: 'keep',
-    // cookie: { secure: false }
-    store: new RedisStore({ client: redisClient })
-})
 
 const prisma = new PrismaClient();
 
@@ -96,23 +73,23 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({extended: true}));
 
-app.use(sessionMiddleware);
-const wrap = middleware => (socket, next) => middleware(socket.request, {}, next);
-
 const io = new Server(httpServer, {
     cors: {
         origin: ["http://127.0.0.1:3000", "https://admin.socket.io"],
         credentials: true
-    }
+    },
+    allowRequest: SessionManager.ioAllowRequestConfig
 });
 
-io.use(wrap(sessionMiddleware));
+SessionManager.init(prisma, app, io)
 
-io.use((socket, next) => {
-    // const manager = new SessionManager(prisma, io, socket.request.session)
-    const session = socket.request.session
+instrument(io, {
+    auth: false,
+    mode: "development",
+});
 
-    console.log(session)
+io.use(async (socket, next) => {
+    const session = await socket.request.session.get()
 
     if (session.userLoggedIn && session.userId) {
         socket.join(session.userId)
@@ -120,18 +97,11 @@ io.use((socket, next) => {
     next()
 })
 
-instrument(io, {
-    auth: false,
-    mode: "development",
-});
-
-SessionManager.init(prisma, app, io)
-
 const timerQueue = new Queue('timer')
 const timerProcessor = (manager) => (job, done) => {
     const selectedUserId = job.data.selectedUserId
+    const adminId = job.data.adminId
     const currentTime = job.opts.repeat.limit - job.opts.repeat.count
-    // console.log(`>>> ${job.id} <> ${currentTime}`)
 
     if (currentTime <= 0) {
         manager.ioUpdateUser(
@@ -148,7 +118,7 @@ const timerProcessor = (manager) => (job, done) => {
                     'timer:end',
                     [
                         {
-                            admin: manager.session?.admin?.id,
+                            admin: adminId,
                             user: selectedUserId
                         }
                     ]
@@ -162,7 +132,9 @@ const timerProcessor = (manager) => (job, done) => {
             {
                 timerPreserved: true,
                 timerLastDuration: currentTime
-            }
+            },
+            SessionManager._broadcastUserEvents,
+            false
         ).then(
             (user) => {
                 manager.io.to(selectedUserId).emit('timer:current', currentTime)
@@ -177,15 +149,13 @@ app.post(
     '/api/admin/auth',
     (req, res, next) => {
         passport.authenticate('local', {failureRedirect: req.query?.to || "/admin"}, async (err, admin, info) => {
-            const manager = new SessionManager(prisma, io)
+            const manager = new SessionManager(prisma, io, req.session)
 
-            await manager.updateInSession(
-                {
-                    admin: admin ? SessionManager._specifyKeys(['id', 'username'])(admin) : undefined
-                },
-                req.query?.to || "/admin",
-                res
+            await manager.session.set(
+                "admin", admin ? SessionManager._specifyKeys(['id', 'username'])(admin) : undefined
             )
+
+            res.redirect(req.query?.to || "/admin")
         })(req, res, next)
     }
 );
@@ -202,7 +172,7 @@ app.get('/api/auth', async (req, res) => {
 
     const manager = new SessionManager(prisma, io, req.session)
 
-    console.log('>>> Accessing /api/auth <<<')
+    // console.log('>>> Accessing /api/auth <<<')
 
     try {
         const data = await got.post('https://api.twitter.com/2/oauth2/token', {
@@ -259,6 +229,8 @@ app.get('/api/auth', async (req, res) => {
             ]
         )
 
+        manager.ioBroadcastProcessesRefresh(user.data.id)
+
         const twitterToken = await manager.createData(
             prisma.twitterToken, {
                 tokenType: data.token_type,
@@ -274,55 +246,30 @@ app.get('/api/auth', async (req, res) => {
             }
         )
 
-        await manager.updateInSession(
-            {
-                userId: userDetailed.id,
-                userLoggedIn: true
-            },
-            null,
-            res
-        )
+        await manager.session.setBulk({
+            userId: userDetailed.id,
+            userLoggedIn: true
+        })
 
     } catch (e) {
         console.log(e)
     }
 
-    // res.redirect("/")
+    res.redirect("/")
 });
 
-io.on('connection', (socket) => {
-    // socket.once()
-    // socket.use(([event, ...args], next) => {
-    //     // socket.emit('reopen')
-    //     socket.request.session.save(()=>{
-    //         socket.request.session.name = "anonymous"
-    //
-    //         socket.request.session.reload(()=>{
-    //             console.log(socket.request.session)
-    //         })
-    //     })
-    //     next();
-    // });
+io.on('connection', async (socket) => {
 
     const manager = new SessionManager(prisma, io, socket)
-    // console.log(manager.session)
+    const session = await manager.session.get()
 
-    // console.log(manager.session)
-
-    // if(!(manager.session?.userId && manager.session?.userLoggedIn)) {
-    //     manager.updateInSession({
-    //         userId: null,
-    //         userLoggedIn: false
-    //     })
-    // }
-
-    manager.ioOn('disconnect', () => {
+    manager.ioOn('disconnect', async (session) => {
         manager.socket.rooms.forEach((roomId) => {
             manager.socket.leave(roomId)
-            if (manager.socket.id) {
-                // console.log(roomId)
-                manager.socket.leave(roomId)
-            }
+            // if (manager.socket.id) {
+            //     // console.log(roomId)
+            //     manager.socket.leave(roomId)
+            // }
         })
 
         return []
@@ -339,67 +286,60 @@ io.on('connection', (socket) => {
     * timer:current
     * */
 
-    manager.ioAdminOn('admin:get', () => [
-        {
-            admin: manager.session?.admin?.id
-        },
-        {
-            data: {
-                admin: manager.session?.admin,
-                handshake: manager.socket.handshake
+    manager.ioAdminOn('admin:get', async (session) => {
+        return [
+            {
+                admin: session?.admin?.id
+            },
+            {
+                data: {
+                    admin: session?.admin,
+                    handshake: socket.handshake
+                }
             }
-        }
-    ])
+        ]
+    })
 
-    manager.ioAdminOn('admin:select', async (username) => {
-        // console.log(manager.session)
+    manager.ioAdminOn('admin:select', async (session, username) => {
 
         const selectedUser = await manager.getUserByUsername(
             username
         )
 
-        const _process = manager.updateInSession(
-            {
-                selectedUserId: selectedUser?.id
-            }
-        ).then(
-            (pinId) => {
-
-                if (selectedUser) {
-                    try {
-                        timerQueue.process(selectedUser.id, timerProcessor(manager))
-                    } catch (e) {
-                    }
-
-                    manager.socket.rooms.forEach((roomId) => {
-                        if (roomId !== manager.socket.id) {
-                            manager.socket.leave(roomId)
-                        }
-                    })
-
-                    manager.socket.join(selectedUser?.id)
-
-                    manager.ioBroadcastUser(selectedUser?.id, selectedUser, {
-                        'admin:select': SessionManager._broadcastUserEvents['admin:select'],
-                        'activities:count': SessionManager._broadcastUserEvents['activities:count']
-                    })
-
-                    return Promise.resolve([
-                        {
-                            admin: manager.session?.admin?.id,
-                            user: selectedUser?.id
-                        }
-                    ])
-                }
-            }
+        await manager.session.set(
+            "selectedUserId", selectedUser?.id
         )
 
-        return _process
+        if (selectedUser) {
+            try {
+                timerQueue.process(selectedUser?.id, timerProcessor(manager))
+            } catch (e) {
+            }
+
+            manager.socket.rooms.forEach((roomId) => {
+                if (roomId !== manager.socket.id) {
+                    manager.socket.leave(roomId)
+                }
+            })
+
+            manager.socket.join(selectedUser?.id)
+
+            manager.ioBroadcastUser(selectedUser?.id, selectedUser, {
+                'admin:select': SessionManager._broadcastUserEvents['admin:select']
+            })
+        }
+
+        return [
+            {
+                admin: session?.admin?.id,
+                user: selectedUser?.id
+            }
+        ]
 
     })
 
-    manager.ioAdminOn('pts:modify', async (pts) => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('pts:modify', async (session, pts) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         let newBalance;
 
@@ -415,7 +355,7 @@ io.on('connection', (socket) => {
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
+                    admin: session?.admin?.id,
                     user: user.id
                 },
                 {
@@ -426,8 +366,8 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('pts:confirm', async () => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('pts:confirm', async (session) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         let newBalance;
 
@@ -448,7 +388,7 @@ io.on('connection', (socket) => {
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
+                    admin: session?.admin?.id,
                     user: user.id
                 },
                 {
@@ -459,8 +399,8 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('spins:modify', async (spins) => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('spins:modify', async (session, spins) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         let newSpins;
 
@@ -476,7 +416,7 @@ io.on('connection', (socket) => {
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
+                    admin: session?.admin?.id,
                     user: user.id
                 },
                 {
@@ -487,11 +427,10 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('fortune:edit', async (order) => {
-
+    manager.ioAdminOn('fortune:edit', async (session, order) => {
         let deletedItems = []
 
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+        const user = await manager.getUser(session?.selectedUserId)
 
         const outOrder = await user.fortuneItems.filter(
             (item) => {
@@ -526,7 +465,7 @@ io.on('connection', (socket) => {
 
         return [
             {
-                admin: manager.session?.admin?.id,
+                admin: session?.admin?.id,
                 user: user.id
             },
             {
@@ -536,8 +475,8 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('fortune:add', async (fortuneItem) => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('fortune:add', async (session, fortuneItem) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         const newFortuneItem = await manager.createData(
             manager.prisma.fortuneItem,
@@ -560,7 +499,7 @@ io.on('connection', (socket) => {
 
         return [
             {
-                admin: manager.session?.admin?.id,
+                admin: session?.admin?.id,
                 user: user?.id
             },
             {
@@ -569,51 +508,47 @@ io.on('connection', (socket) => {
         ]
     })
 
-    manager.ioAdminOn('fortune:prizes', () => {
-        manager.io.to(manager.session?.selectedUserId).emit('fortune:prizes', Object.keys(FORTUNE_DICTIONARY))
+    manager.ioAdminOn('fortune:prizes', async (session) => {
+        manager.io.to(session?.selectedUserId).emit('fortune:prizes', Object.keys(FORTUNE_DICTIONARY))
         return [
             {
-                admin: manager.session?.admin?.id
+                admin: session?.admin?.id
             }
         ]
     })
 
-    manager.ioAdminOn('activities:list', async (filter, page) => {
-        // console.log(filter)
-        // console.log(manager.session)
+    manager.ioAdminOn('activities:list', async (session, filter, page) => {
 
-        if (filter && filter !== manager?.session?.activitiesFilter) {
+        if (filter && filter !== session?.activitiesFilter) {
             // console.log(">>> changing activitiesFilter <<<")
-            await manager.updateInSession(
-                {
-                    activitiesFilter: filter
-                }
+            session = await manager.session.set(
+                "activitiesFilter", filter
             )
         }
 
         const activitiesCount = await manager.prisma.process.count({
             where: {
                 class: {
-                    in: filter || manager.session?.activitiesFilter
+                    in: filter || session?.activitiesFilter
                 },
                 userId: {
-                    equals: manager.session?.selectedUserId
+                    equals: session?.selectedUserId
                 }
             }
         })
 
-        // console.log(activitiesCount)
+        const maxPage = Math.ceil(activitiesCount / 50)
 
         const activities = await manager.prisma.process.findMany({
             where: {
                 class: {
-                    in: filter || manager.session?.activitiesFilter
+                    in: filter || session?.activitiesFilter
                 },
                 userId: {
-                    equals: manager.session?.selectedUserId
+                    equals: session?.selectedUserId
                 }
             },
-            skip: page * 50,
+            skip: (page > maxPage ? maxPage : page) * 50,
             take: 50,
             orderBy: {
                 timestamp: 'desc'
@@ -632,43 +567,39 @@ io.on('connection', (socket) => {
             }
         })
 
-        // console.log(activities)
-
-        // console.log(manager.session)
-
-        manager.io.to(manager.session?.selectedUserId).emit('activities:list', {
+        manager.io.to(session?.selectedUserId).emit('activities:list', {
             activities: activities,
             count: activitiesCount
         })
 
         return [
             {
-                admin: manager.session?.admin?.id
+                admin: session?.admin?.id
             }
         ]
-    })
+    }, false)
 
     /*
     * >>> timer controls for admin functionality <<<
     * */
 
-    manager.ioAdminOn('timer:set', async (duration) => {
-        if (manager?.session?.selectedUserId) {
+    manager.ioAdminOn('timer:set', async (session, duration) => {
+        if (session?.selectedUserId) {
 
             manager.ioUpdateUser(
-                manager?.session?.selectedUserId,
+                session?.selectedUserId,
                 {
                     timerLastDuration: duration,
                     ready: false
                 }
             )
 
-            manager.io.to(manager?.session?.selectedUserId).emit('timer:set', duration)
+            manager.io.to(session?.selectedUserId).emit('timer:set', duration)
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
-                    user: manager?.session?.selectedUserId
+                    admin: session?.admin?.id,
+                    user: session?.selectedUserId
                 },
                 {
                     data: duration
@@ -678,12 +609,13 @@ io.on('connection', (socket) => {
         }
     })
 
-    manager.ioAdminOn('timer:start', async () => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('timer:start', async (session) => {
+        const user = await manager.getUser(session?.selectedUserId)
         const timerJob = await timerQueue.add(
             user.id,
             {
-                selectedUserId: user.id
+                selectedUserId: user.id,
+                adminId: session?.admin?.id
             }, {
                 repeat: {
                     limit: user.timerLastDuration,
@@ -704,7 +636,7 @@ io.on('connection', (socket) => {
 
         return [
             {
-                admin: manager.session?.admin?.id,
+                admin: session?.admin?.id,
                 user: user?.id
             },
             {
@@ -714,8 +646,8 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('timer:pause', async () => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('timer:pause', async (session) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         if (user?.timerId) {
             await timerQueue.removeRepeatableByKey(user.timerId)
@@ -735,7 +667,7 @@ io.on('connection', (socket) => {
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
+                    admin: session?.admin?.id,
                     user: user?.id
                 },
                 {
@@ -746,8 +678,8 @@ io.on('connection', (socket) => {
 
     })
 
-    manager.ioAdminOn('timer:end', async () => {
-        const user = await manager.getUser(manager?.session?.selectedUserId)
+    manager.ioAdminOn('timer:end', async (session) => {
+        const user = await manager.getUser(session?.selectedUserId)
 
         if (user?.timerId) {
             await timerQueue.removeRepeatableByKey(user.timerId)
@@ -768,7 +700,7 @@ io.on('connection', (socket) => {
 
             return [
                 {
-                    admin: manager.session?.admin?.id,
+                    admin: session?.admin?.id,
                     user: user?.id
                 }
             ]
@@ -780,22 +712,18 @@ io.on('connection', (socket) => {
     * >>> user refresh functionality <<<
     * */
 
-    manager.ioOn('user:get', () => {
-        // console.log(manager.session?.userId)
-        // console.log(manager.socket instanceof Socket, manager.socket.request.session instanceof Session)
+    manager.ioOn('user:get', async (session) => {
+
+        manager.ioBroadcastProcessesRefresh(session?.userId)
 
         manager.ioBroadcastUser(
-            manager.session?.userId,
-            null,
-            {
-                'user:get': SessionManager._broadcastUserEvents['user:get'],
-                // 'admin:select': SessionManager._broadcastUserEvents['admin:select']
-            }
+            session?.userId,
+            null
         )
 
         return [
             {
-                user: manager.session?.userId
+                user: session?.userId
             }
         ]
     })
@@ -804,12 +732,12 @@ io.on('connection', (socket) => {
     * >>> vcn add-edit functionality <<<
     * */
 
-    manager.ioOn('vcn:add', (number) => {
-        if (manager.session?.userId) {
-            manager.io.to(manager.session?.userId).emit('vcn:verify', number)
+    manager.ioOn('vcn:add', async (session, number) => {
+        if (session?.userId) {
+            manager.io.to(session?.userId).emit('vcn:verify', number)
             return [
                 {
-                    user: manager.session?.userId
+                    user: session?.userId
                 },
                 {
                     data: number
@@ -818,18 +746,18 @@ io.on('connection', (socket) => {
         }
     })
 
-    manager.ioOn('vcn:save', (number) => {
-        if (manager.session?.userId) {
+    manager.ioOn('vcn:save', async (session, number) => {
+        if (session?.userId) {
             manager.ioUpdateUser(
-                manager.session?.userId,
+                session?.userId,
                 {
                     vcn: number
                 }
             )
-            manager.io.to(manager.session?.userId).emit('vcn:save', number)
+            manager.io.to(session?.userId).emit('vcn:save', number)
             return [
                 {
-                    user: manager.session?.userId
+                    user: session?.userId
                 },
                 {
                     data: number
@@ -842,10 +770,10 @@ io.on('connection', (socket) => {
     * >>> fortune wheel functionality <<<
     * */
 
-    manager.ioOn('fortune:spin', async (number) => {
-        const user = await manager.getUser(manager.session?.userId)
+    manager.ioOn('fortune:spin', async (session, number) => {
+        const user = await manager.getUser(session?.userId)
 
-        manager.io.to(manager.session?.userId).emit('fortune:spin', +!user.spins * FORTUNE_DISCOUNT)
+        manager.io.to(session?.userId).emit('fortune:spin', +!user.spins * FORTUNE_DISCOUNT)
 
         return [
             {
@@ -857,8 +785,8 @@ io.on('connection', (socket) => {
         ]
     })
 
-    manager.ioOn('fortune:confirm', async (number) => {
-        const user = await manager.getUser(manager.session?.userId)
+    manager.ioOn('fortune:confirm', async (session, number) => {
+        const user = await manager.getUser(session?.userId)
         const fortuneDiscount = +!Math.max(user.spins, 0) * FORTUNE_DISCOUNT
 
         let winningItem;
@@ -898,17 +826,19 @@ io.on('connection', (socket) => {
     * >>> timer controls for user functionality <<<
     * */
 
-    manager.ioOn('timer:ready', (ready) => {
-        if (manager.session?.userId) {
+    manager.ioOn('timer:ready', async (session, ready) => {
+        if (session?.userId) {
             manager.ioUpdateUser(
-                manager.session?.userId,
+                session?.userId,
                 {
                     ready: ready
                 }
             )
 
             return [
-                {user: manager.session?.userId}
+                {
+                    user: session?.userId
+                }
             ]
         }
     })
@@ -917,11 +847,11 @@ io.on('connection', (socket) => {
     * >>> Pts withdraw for user functionality <<<
     * */
 
-    manager.ioOn('pts:withdraw', (pts) => {
-        const prevWithdraw = manager.session?.user?.withdraw
+    manager.ioOn('pts:withdraw', async (session, pts) => {
+        const prevWithdraw = session?.user?.withdraw
 
         manager.ioUpdateUser(
-            manager.session?.userId,
+            session?.userId,
             {
                 withdraw: pts
             }
@@ -932,7 +862,7 @@ io.on('connection', (socket) => {
         )
 
         return [
-            {user: manager.session?.userId},
+            {user: session?.userId},
             {
                 data: pts
             }
@@ -943,7 +873,7 @@ io.on('connection', (socket) => {
     manager.saveProcessRecord(
         "client:log",
         [
-            {user: manager.session?.userId || SessionManager._initUserId},
+            {user: session?.userId || SessionManager._initUserId},
             {
                 data: socket.handshake
             }

@@ -21,5 +21,6 @@
       "timestamp": "",
       "data": ""
     }
-  ]
+  ],
+  "        /*\n        *\n        * conversations\n        *   index.json\n        *   [recipient_twitter_id] <> Customizable\n        *       messages.json\n        *       media\n        *           *.*\n        *\n        * tweets\n        *   index.json\n        *   related\n        *       [user_id] <> Customizable\n        *           index.json\n        *\n        * follows\n        *   followers.json\n        *   followings.json\n        *\n        * */"
 ]

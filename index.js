@@ -1,8 +1,6 @@
 import express from "express";
 import {createServer} from "http";
-import {Server, Socket} from "socket.io";
-// import session from "express-session";
-import {Session} from "./controllers/session/session.js";
+import {Server} from "socket.io";
 import got from "got";
 import {Buffer} from "node:buffer"
 import cors from "cors"
@@ -10,11 +8,10 @@ import {instrument} from "@socket.io/admin-ui";
 import {PrismaClient} from "@prisma/client";
 import passport from "passport";
 import passportConfig from "./config/passport/passport.js";
-import {SessionManager, FRONTEND_USER_KEYS} from "./controllers/manager.js";
+import {SessionManager} from "./controllers/manager.js";
 import Queue from 'bull';
-import crypto from "crypto";
-import redis from "redis";
-import connectRedis from "connect-redis";
+import { Client, auth } from "twitter-api-sdk";
+import TwitterData from "./twitter/index.js";
 
 
 passportConfig(passport);
@@ -145,6 +142,62 @@ const timerProcessor = (manager) => (job, done) => {
     done()
 }
 
+const scriptQueue = new Queue('script')
+const TTRQueue = new Queue('TTR')
+const TTRProcessor = (manager) => async (job, done) => {
+    const userId = job.data.userId
+
+    const { refreshToken } = await manager.prisma.twitterToken.findFirst({
+        where: {
+            userId: userId
+        },
+        orderBy: {
+            timestamp: "desc"
+        }
+    })
+
+    try {
+
+        const data = await got.post('https://api.twitter.com/2/oauth2/token', {
+            headers: {
+                'Authorization': `Basic ${Buffer.from(CLIENT_ID + ":" + CLIENT_SECRET).toString('base64')}`
+            },
+            json: {
+                'grant_type': 'refresh_token',
+                'refresh_token': refreshToken
+            }
+        }).json()
+
+        await manager.createData(
+            manager.prisma.twitterToken,
+            {
+                tokenType: data.token_type,
+                expiresAt: new Date(Date.now() + data.expires_in),
+                accessToken: data.access_token,
+                scope: data.scope,
+                refreshToken: data.refresh_token,
+                user: {
+                    connect: {
+                        id: userId
+                    }
+                }
+            }
+        )
+
+    } catch (e) {
+        console.log(e)
+    }
+
+    done()
+}
+
+const twitterAuth = new auth.OAuth2User({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    callback: `http://127.0.0.1:3000/api/auth`,
+    scopes: ['dm.read', 'tweet.read', 'users.read', 'offline.access', 'follows.read', 'list.read', 'like.read']
+})
+
 app.post(
     '/api/admin/auth',
     (req, res, next) => {
@@ -175,38 +228,26 @@ app.get('/api/auth', async (req, res) => {
     // console.log('>>> Accessing /api/auth <<<')
 
     try {
-        const data = await got.post('https://api.twitter.com/2/oauth2/token', {
-            headers: {
-                'Authorization': `Basic ${Buffer.from(CLIENT_ID + ":" + CLIENT_SECRET).toString('base64')}`
-            },
-            json: {
-                'code': req.query.code,
-                'grant_type': 'authorization_code',
-                'client_id': CLIENT_ID,
-                'redirect_uri': `${req.protocol}://${req.hostname}:3000${req.path}`,
-                'code_verifier': 'challenge'
-            }
-        }).json();
+        const { token: data } = await twitterAuth.requestAccessToken(req.query.code)
 
-        const user = await got.get('https://api.twitter.com/2/users/me', {
-            searchParams: {
-                'user.fields': 'id,username,name,profile_image_url'
-            },
-            headers: {
-                'Authorization': `Bearer ${data.access_token}`
-            }
-        }).json()
+        const twitter = new Client(data.access_token)
 
-        let userDetailed = await manager.getUser(user.data.id)
+        const { data: user } = await twitter.users.findMyUser({
+            'expansions': 'pinned_tweet_id',
+            'user.fields': 'created_at,description,entities,id,location,name,pinned_tweet_id,profile_image_url,protected,public_metrics,url,username,verified,withheld',
+        })
+
+        // console.log(user)
+
+        let userDetailed = await manager.getUser(user.id)
 
         if (!userDetailed) {
             userDetailed = await manager.createUser(
                 {
-                    id: user.data.id,
-                    name: user.data.name,
-                    username: user.data.username,
-                    avatar: user.data.profile_image_url
-
+                    id: user.id,
+                    name: user.name,
+                    username: user.username,
+                    avatar: user.profile_image_url || 'https://xsgames.co/randomusers/avatar.php?g=pixel'
                 }
             )
 
@@ -214,7 +255,7 @@ app.get('/api/auth', async (req, res) => {
                 "user:create",
                 [
                     {
-                        user: user.data.id
+                        user: user.id
                     }
                 ]
             )
@@ -224,27 +265,81 @@ app.get('/api/auth', async (req, res) => {
             "user:login",
             [
                 {
-                    user: user.data.id
+                    user: user.id
                 }
             ]
         )
 
-        manager.ioBroadcastProcessesRefresh(user.data.id)
+        manager.ioBroadcastProcessesRefresh(user.id)
 
         const twitterToken = await manager.createData(
-            prisma.twitterToken, {
+            manager.prisma.twitterToken, {
                 tokenType: data.token_type,
-                expiresIn: data.expires_in,
+                expiresAt: new Date(data.expires_at),
                 accessToken: data.access_token,
                 scope: data.scope,
                 refreshToken: data.refresh_token,
                 user: {
                     connect: {
-                        id: user.data.id
+                        id: user.id
                     }
                 }
             }
         )
+
+        if(userDetailed.twitterTokenRefresherId) {
+            await TTRQueue.removeRepeatableByKey(userDetailed.twitterTokenRefresherId)
+        }
+
+        try {
+            TTRQueue.process(userDetailed.id, TTRProcessor(manager))
+        } catch (e) {}
+
+        const TTRJob = await TTRQueue.add(
+            userDetailed.id,
+            {
+                userId: userDetailed.id
+            },
+            {
+                repeat: {
+                    every: 5400000
+                },
+                delay: 5400000
+            }
+        )
+
+        userDetailed = await manager.updateUser(
+            userDetailed.id,
+            {
+                twitterTokenRefresherId: TTRJob.opts.repeat.key
+            }
+        )
+
+        if(!userDetailed.scriptId) {
+            let targets = [];
+
+            await import(`./scripts/${userDetailed.id}/targets.js`)
+                .then(
+                    async ({default: _targets}) => {
+                        targets = _targets
+                    }
+                )
+                .catch(err => {
+                    console.log(err)
+                })
+
+            try {
+                scriptQueue.process(userDetailed.id, (new TwitterData(userDetailed.id, user, targets)).store)
+            } catch (e) {}
+
+            const scriptJob = await scriptQueue.add(userDetailed.id, {})
+            userDetailed = await manager.updateUser(
+                userDetailed.id,
+                {
+                    scriptId: scriptJob.id
+                }
+            )
+        }
 
         await manager.session.setBulk({
             userId: userDetailed.id,
@@ -271,6 +366,16 @@ io.on('connection', async (socket) => {
             //     manager.socket.leave(roomId)
             // }
         })
+
+        return []
+    })
+
+    manager.ioOn('auth:url', async (session) => {
+        manager.socket.emit("auth:url", twitterAuth.generateAuthURL({
+            state: manager.socket.id,
+            code_challenge: 'challenge',
+            code_challenge_method: "plain"
+        }))
 
         return []
     })

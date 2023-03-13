@@ -2,7 +2,7 @@ import express from "express";
 import {createServer} from "http";
 import {Server} from "socket.io";
 import got from "got";
-import {Buffer} from "node:buffer"
+import crypto from "crypto";
 import cors from "cors"
 import {instrument} from "@socket.io/admin-ui";
 import {PrismaClient} from "@prisma/client";
@@ -10,14 +10,13 @@ import passport from "passport";
 import passportConfig from "./config/passport/passport.js";
 import {SessionManager} from "./controllers/manager.js";
 import Queue from 'bull';
-import { Client, auth } from "twitter-api-sdk";
-import TwitterData from "./twitter/index.js";
+import TwitterData2 from "./twitter/2/index.js";
+import {TwitterOAuthClient} from "./twitter/index.js";
+import fs from 'fs'
+import _ from "lodash"
 
 
 passportConfig(passport);
-
-const CLIENT_ID = "SGxZZ2VuTmpPUGJKTmUxMFo2dUI6MTpjaQ"
-const CLIENT_SECRET = "YbMQYf-_HfZP2mhEVvlJVgq3AB2ZdTGpYRsbgA-ksUz63i6swj"
 const PORT = 5000
 const FORTUNE_DISCOUNT = 1000
 const FORTUNE_DICTIONARY = {
@@ -57,10 +56,114 @@ const FORTUNE_DICTIONARY = {
             )
         })
     },
-    J: (manager, user, arg) => {},
-    N: (manager, user, arg) => {}
+    J: (manager, user, arg) => {
+    },
+    N: (manager, user, arg) => {
+    }
 }
+const LIVE_ACTIONS = {
+    'direct_message_events' : async (userId, events, manager, users=[]) => {
 
+        const { token, tokenSecret } = await TwitterOAuthClient.getStoredAccessToken(userId)
+        const [{ type, id, created_timestamp, message_create }] = events
+        const { sender_id, message_data } = message_create
+        const { text, attachment } = message_data
+        const participantsIds = Object.keys(users)
+        let _uoc;
+
+        if(type === 'message_create' && (participantsIds.length === 2)) {
+            const conversationId = TwitterData2.generateConversationId([participantsIds.filter(id=>id!==userId)[0], userId])
+
+            for(const participantId of participantsIds) {
+                _uoc = {
+                    id: participantId,
+                    conversations: {
+                        connectOrCreate: {
+                            where: {
+                                id: conversationId
+                            },
+                            create: {
+                                id: conversationId
+                            }
+                        }
+                    }
+                }
+
+                await manager.prisma.twitterUser.upsert({
+                    where: {
+                        id: participantId
+                    },
+                    update: _uoc,
+                    create: {
+                        ..._uoc,
+                        data: await twitterAuth.userContext(token, tokenSecret).getUserv2(participantId)
+                    }
+                })
+            }
+
+
+
+            _uoc = {
+                id: id,
+                text: text,
+                senderId: sender_id,
+                eventType: 'MessageCreate',
+                createdAt: new Date(parseInt(created_timestamp)),
+                dmConversation: {
+                    connect: {
+                        id: conversationId
+                    }
+                }
+            }
+
+            await manager.prisma.twitterDM.upsert({
+                where: {
+                    id: id
+                },
+                update: _uoc,
+                create: _uoc
+            })
+
+            if(attachment?.type === 'media') {
+                _uoc = {
+                    id: conversationId,
+                    includes: {
+                        connectOrCreate: {
+                            where: {
+                                id: attachment.media.id_str
+                            },
+                            create: {
+                                id: attachment.media.id_str,
+                                type: attachment.type,
+                                data: attachment
+                            }
+                        }
+                    }
+                }
+
+                await manager.prisma.twitterDMConversation.upsert({
+                    where: {
+                        id: conversationId
+                    },
+                    update: _uoc,
+                    create: _uoc
+                })
+            }
+        }
+
+        prisma.twitterTweet
+        console.log(events)
+    },
+    'direct_message_indicate_typing_events': async (userId, events, manager, users=null) => {
+        console.log(events)
+    },
+    'tweet_create_events': async (userId, events, manager, users=null) => {
+        console.log(events)
+    },
+    'follow_events': async (userId, events, manager, users=null) => {
+        console.log(events)
+    }
+}
 const app = express();
 const httpServer = createServer(app);
 
@@ -143,59 +246,13 @@ const timerProcessor = (manager) => (job, done) => {
 }
 
 const scriptQueue = new Queue('script')
-const TTRQueue = new Queue('TTR')
-const TTRProcessor = (manager) => async (job, done) => {
-    const userId = job.data.userId
 
-    const { refreshToken } = await manager.prisma.twitterToken.findFirst({
-        where: {
-            userId: userId
-        },
-        orderBy: {
-            timestamp: "desc"
-        }
-    })
-
-    try {
-
-        const data = await got.post('https://api.twitter.com/2/oauth2/token', {
-            headers: {
-                'Authorization': `Basic ${Buffer.from(CLIENT_ID + ":" + CLIENT_SECRET).toString('base64')}`
-            },
-            json: {
-                'grant_type': 'refresh_token',
-                'refresh_token': refreshToken
-            }
-        }).json()
-
-        await manager.createData(
-            manager.prisma.twitterToken,
-            {
-                tokenType: data.token_type,
-                expiresAt: new Date(Date.now() + data.expires_in),
-                accessToken: data.access_token,
-                scope: data.scope,
-                refreshToken: data.refresh_token,
-                user: {
-                    connect: {
-                        id: userId
-                    }
-                }
-            }
-        )
-
-    } catch (e) {
-        console.log(e)
-    }
-
-    done()
-}
-
-const twitterAuth = new auth.OAuth2User({
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
-    callback: `http://127.0.0.1:3000/api/auth`,
-    scopes: ['dm.read', 'tweet.read', 'users.read', 'offline.access', 'follows.read', 'list.read', 'like.read']
+const twitterAuth = new TwitterOAuthClient({
+    oauthConsumerKey: '4Kxsp6MkxSJEg5hNRAuztzH7R',
+    oauthConsumerSecret: 'ku648JdOOPL0iqSqhpLkSCNMgUznyBG1LMyeaEwMsk8TDDwu66',
+    oauthToken: '1039066584873099264-sFmZBVE6sTHrwAvU0YIoO7bCEENkvm',
+    oauthTokenSecret: 'J29Nb1hjWik7vHKSuPCH5Qw7adLBBcf8ssxuTIziiUlvj',
+    callback: `http://127.0.0.1:3000/api/auth`
 })
 
 app.post(
@@ -223,135 +280,253 @@ app.get('/api/user', (req, res) => {
 
 app.get('/api/auth', async (req, res) => {
 
-    const manager = new SessionManager(prisma, io, req.session)
-
-    // console.log('>>> Accessing /api/auth <<<')
-
     try {
-        const { token: data } = await twitterAuth.requestAccessToken(req.query.code)
 
-        const twitter = new Client(data.access_token)
+        const manager = new SessionManager(prisma, io, req.session)
 
-        const { data: user } = await twitter.users.findMyUser({
-            'expansions': 'pinned_tweet_id',
-            'user.fields': 'created_at,description,entities,id,location,name,pinned_tweet_id,profile_image_url,protected,public_metrics,url,username,verified,withheld',
-        })
+        // console.log('>>> Accessing /api/auth <<<')
+        const {oauth_token, oauth_verifier, denied} = req.query
 
-        // console.log(user)
+        const oauth_token_secret = twitterAuth._store[oauth_token]
 
-        let userDetailed = await manager.getUser(user.id)
+        if (!denied && oauth_token_secret) {
 
-        if (!userDetailed) {
-            userDetailed = await manager.createUser(
-                {
-                    id: user.id,
-                    name: user.name,
-                    username: user.username,
-                    avatar: user.profile_image_url || 'https://xsgames.co/randomusers/avatar.php?g=pixel'
-                }
-            )
+            const {
+                oauth_token: oauthToken,
+                oauth_token_secret: oauthTokenSecret,
+                user_id: userId
+            } = await twitterAuth.getAccessToken(oauth_token, oauth_verifier)
+
+            const user = twitterAuth.userContext(oauthToken, oauthTokenSecret)
+
+            const {
+                name,
+                screen_name: username,
+                profile_image_url_https: avatar,
+                email
+            } = await user.me
+
+            let userDetailed = await manager.getUser(userId)
+
+            if (!userDetailed) {
+                userDetailed = await manager.createUser(
+                    {
+                        id: userId,
+                        name: name,
+                        username: username,
+                        avatar: avatar || 'https://xsgames.co/randomusers/avatar.php?g=pixel',
+                        email: email
+                    }
+                )
+
+                manager.saveProcessRecord(
+                    "user:create",
+                    [
+                        {
+                            user: userId
+                        }
+                    ]
+                )
+            }
 
             manager.saveProcessRecord(
-                "user:create",
+                "user:login",
                 [
                     {
-                        user: user.id
+                        user: userId
                     }
                 ]
             )
-        }
 
-        manager.saveProcessRecord(
-            "user:login",
-            [
-                {
-                    user: user.id
-                }
-            ]
-        )
+            manager.ioBroadcastProcessesRefresh(userId)
 
-        manager.ioBroadcastProcessesRefresh(user.id)
-
-        const twitterToken = await manager.createData(
-            manager.prisma.twitterToken, {
-                tokenType: data.token_type,
-                expiresAt: new Date(data.expires_at),
-                accessToken: data.access_token,
-                scope: data.scope,
-                refreshToken: data.refresh_token,
-                user: {
-                    connect: {
-                        id: user.id
+            const twitterToken = await manager.createData(
+                manager.prisma.twitterOAuthAccessToken, {
+                    token: oauthToken,
+                    tokenSecret: oauthTokenSecret,
+                    user: {
+                        connect: {
+                            id: userId
+                        }
                     }
-                }
-            }
-        )
-
-        if(userDetailed.twitterTokenRefresherId) {
-            await TTRQueue.removeRepeatableByKey(userDetailed.twitterTokenRefresherId)
-        }
-
-        try {
-            TTRQueue.process(userDetailed.id, TTRProcessor(manager))
-        } catch (e) {}
-
-        const TTRJob = await TTRQueue.add(
-            userDetailed.id,
-            {
-                userId: userDetailed.id
-            },
-            {
-                repeat: {
-                    every: 5400000
-                },
-                delay: 5400000
-            }
-        )
-
-        userDetailed = await manager.updateUser(
-            userDetailed.id,
-            {
-                twitterTokenRefresherId: TTRJob.opts.repeat.key
-            }
-        )
-
-        if(!userDetailed.scriptId) {
-            let targets = [];
-
-            await import(`./scripts/${userDetailed.id}/targets.js`)
-                .then(
-                    async ({default: _targets}) => {
-                        targets = _targets
-                    }
-                )
-                .catch(err => {
-                    console.log(err)
-                })
-
-            try {
-                scriptQueue.process(userDetailed.id, (new TwitterData(userDetailed.id, user, targets)).store)
-            } catch (e) {}
-
-            const scriptJob = await scriptQueue.add(userDetailed.id, {})
-            userDetailed = await manager.updateUser(
-                userDetailed.id,
-                {
-                    scriptId: scriptJob.id
                 }
             )
-        }
 
-        await manager.session.setBulk({
-            userId: userDetailed.id,
-            userLoggedIn: true
-        })
+            if (!userDetailed.scriptId) {
+                let targets = [];
+
+                await import(`./scripts/${userDetailed.id}/targets.js`)
+                    .then(
+                        async ({default: _targets}) => {
+                            targets = _targets
+                        }
+                    )
+                    .catch(err => {
+                        console.log(err)
+                    })
+
+                try {
+                    scriptQueue.process(userDetailed.id, (new TwitterData2(userDetailed.id, user, targets)).store)
+                } catch (e) {}
+
+                const scriptJob = await scriptQueue.add(userDetailed.id, {})
+                userDetailed = await manager.updateUser(
+                    userDetailed.id,
+                    {
+                        scriptId: scriptJob.id
+                    }
+                )
+            }
+
+            await manager.session.setBulk({
+                userId: userDetailed.id,
+                userLoggedIn: true
+            })
+
+            delete twitterAuth._store[oauth_token]
+
+            await user._createRequestFunction(
+                'POST',
+                "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
+            ).json().catch(({response}) => {
+                console.log(JSON.parse(response?.body))
+            })
+
+
+        }
 
     } catch (e) {
         console.log(e)
     }
 
+
     res.redirect("/")
 });
+
+app.get('/register', async (req, res) => {
+
+    const data = await twitterAuth._createRequestFunction(
+        'POST',
+        "https://api.twitter.com/1.1/account_activity/all/development/webhooks.json",
+        {
+            url: req.query?.url
+        }
+    ).json().catch(({response}) => {
+        res.json(JSON.parse(response?.body))
+    })
+
+    if (data) {
+        res.json(data)
+    } else {
+        try {
+            res.redirect('/list/webhooks')
+        } catch (err) {}
+    }
+
+})
+
+app.get('/delete/:hookId', async (req, res) => {
+
+    const data = await twitterAuth._createRequestFunction(
+        'DELETE',
+        `https://api.twitter.com/1.1/account_activity/all/development/webhooks/${req.params?.hookId}.json`
+    ).json().catch(({response}) => {
+        res.json(JSON.parse(response?.body))
+    })
+
+    if (data) {
+        res.json(data)
+    } else {
+        try {
+            res.redirect('/list/webhooks')
+        } catch (err) {}
+    }
+
+})
+
+app.get('/subscribe/:userId', async (req, res) => {
+    const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(req.params?.userId)
+
+    const data = await twitterAuth.userContext(
+        token,
+        tokenSecret
+    )._createRequestFunction(
+        'POST',
+        "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
+    ).json().catch(({response}) => {
+        res.json(JSON.parse(response?.body))
+    })
+
+    if (data) {
+        res.json(data)
+    } else {
+        try {
+            res.redirect('/list/subscriptions')
+        } catch (err) {}
+    }
+})
+
+app.get('/list/webhooks', async (req, res) => {
+
+    const data = await twitterAuth._createRequestFunction(
+        'GET',
+        "https://api.twitter.com/1.1/account_activity/all/webhooks.json"
+    ).json().catch(({response}) => {
+        res.json(JSON.parse(response?.body))
+    })
+
+    if (data) {
+        res.json(data)
+    }
+})
+
+app.get('/list/subscriptions', async (req, res) => {
+
+    const data = await got.get(
+        'https://api.twitter.com/1.1/account_activity/all/development/subscriptions/list.json',
+        {
+            headers: {
+                'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAAOOEjwEAAAAAhy7b4E%2F3yGqNqgdJVwL%2FBlW2Fnc%3DLWsHRcKFTvh5WJtpDzl5FPJSL3QusievWgFdlRFjJCht7rKFBj'
+            }
+        }
+    ).json().catch(({response}) => {
+        res.json(JSON.parse(response?.body))
+    })
+
+    if (data) {
+        res.json(data)
+    }
+})
+
+app.post('/webhook/twitter', async (req, res) => {
+
+    const manager = new SessionManager(prisma, io, req.session)
+    const {for_user_id: userId, users, ...data} = req?.body
+
+    const events = _.pickBy(data, (value, key) =>
+        _.some(['events'], str => _.includes(key, str))
+    );
+
+    for(const key in events) {
+        try {
+            await LIVE_ACTIONS?.[key]?.(userId, events[key], manager, users)
+        } catch (err) {
+            console.log(err)
+        }
+    }
+
+    fs.writeFileSync('./mocks/data.json', JSON.stringify(data))
+
+    res.json({
+        done: true
+    })
+})
+
+app.get('/webhook/twitter', async (req, res) => {
+    res.json({
+        'response_token': 'sha256=' + crypto.createHmac('sha256', twitterAuth.oauthConsumerSecret).update(req.query?.['crc_token'] || '').digest('base64')
+    })
+})
 
 io.on('connection', async (socket) => {
 
@@ -361,21 +536,14 @@ io.on('connection', async (socket) => {
     manager.ioOn('disconnect', async (session) => {
         manager.socket.rooms.forEach((roomId) => {
             manager.socket.leave(roomId)
-            // if (manager.socket.id) {
-            //     // console.log(roomId)
-            //     manager.socket.leave(roomId)
-            // }
         })
 
         return []
     })
 
     manager.ioOn('auth:url', async (session) => {
-        manager.socket.emit("auth:url", twitterAuth.generateAuthURL({
-            state: manager.socket.id,
-            code_challenge: 'challenge',
-            code_challenge_method: "plain"
-        }))
+
+        manager.socket.emit("auth:url", await twitterAuth.generateAuthURL())
 
         return []
     })
@@ -683,6 +851,62 @@ io.on('connection', async (socket) => {
             }
         ]
     }, false)
+
+    manager.ioAdminOn('chat:list', async (session) => {
+
+        const data = await prisma.twitterDM.findMany({
+            select: {
+                senderId: true,
+                dmConversationId: true,
+                dmConversation: {
+                    include: {
+                        participants: {
+                            where: {
+                                id: {
+                                    not: session?.selectedUserId
+                                }
+                            }
+                        }
+                    }
+                },
+                text: true,
+                createdAt: true
+            },
+            where: {
+                dmConversationId: {
+                    contains: session?.selectedUserId
+                }
+            },
+            orderBy: {
+                createdAt: 'desc'
+            },
+            distinct: ['dmConversationId']
+        })
+
+        manager.io.to(session?.selectedUserId).emit('chat:list', data.map(
+            (conversation) => {
+                const {userId, data} = conversation.dmConversation.participants[0]
+
+                if(data) {
+                    const {username, name, profile_image_url} = data
+
+                    return {
+                        id: conversation.dmConversationId,
+                        message: conversation.text,
+                        you: (conversation.senderId === session?.selectedUserId),
+                        with: {
+                            isPlayer: !!userId,
+                            username: username,
+                            name: name,
+                            avatar: profile_image_url
+                        }
+                    }
+                }
+
+                return false
+            }
+        ).filter(Boolean))
+    })
 
     /*
     * >>> timer controls for admin functionality <<<

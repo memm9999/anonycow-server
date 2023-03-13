@@ -1,12 +1,9 @@
-import Queue from "bull";
 import {Socket} from "socket.io";
-// import {Session} from "express-session";
 import {Session} from "./session/session.js";
 import crypto from "crypto";
 import cookieParser from "cookie-parser"
 import session from "./session/middleware.js";
 import { serialize } from "cookie";
-import {wrap} from "prisma/prisma-client/runtime/index.js";
 
 export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready', 'fortuneOrder', 'totalProcesses']
 
@@ -54,6 +51,7 @@ export class SessionManager {
             "fortune:confirm",
             "fortune:prizes",
             "activities:list",
+            "chat:list",
             "activities:refresh",
             "client:log",
             "admin:get",

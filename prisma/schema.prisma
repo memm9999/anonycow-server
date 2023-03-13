@@ -18,38 +18,35 @@ model Admin {
 }
 
 model User {
-  id                      String         @id @unique
+  id                      String                    @id @unique
   name                    String
-  username                String         @unique
+  username                String                    @unique
   avatar                  String
-  timerPreserved          Boolean        @default(false)
-  timerLastDuration       Int            @default(0)
+  email                   String?
+  timerPreserved          Boolean                   @default(false)
+  timerLastDuration       Int                       @default(0)
   timerId                 String?
-  balance                 Int            @default(335)
-  spins                   Int            @default(0)
+  balance                 Int                       @default(335)
+  spins                   Int                       @default(0)
   vcn                     String?
   fortuneItems            FortuneItem[]
   fortuneOrder            Int[]
-  twitterTokens           TwitterToken[]
-  twitterTokenRefresherId String?
+  twitterTokens           TwitterOAuthAccessToken[]
   twitterUser             TwitterUser?
-  scripted                Boolean        @default(false)
+  scripted                Boolean                   @default(false)
   scriptId                String?
   processes               Process[]
-  withdraw                Int            @default(0)
-  ready                   Boolean        @default(false)
+  withdraw                Int                       @default(0)
+  ready                   Boolean                   @default(false)
 }
 
-model TwitterToken {
-  id           Int      @id @default(autoincrement())
-  tokenType    String
-  expiresAt    DateTime
-  accessToken  String
-  refreshToken String
-  scope        String
-  timestamp    DateTime @default(now())
-  user         User     @relation(fields: [userId], references: [id])
-  userId       String
+model TwitterOAuthAccessToken {
+  id          Int      @id @default(autoincrement())
+  token       String
+  tokenSecret String
+  timestamp   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+  userId      String
 }
 
 model TwitterDM {
@@ -83,15 +80,6 @@ model TwitterDMInclude {
   data          Json?
   conversations TwitterDMConversation[]
 }
-
-// model TwitterDMIncludeInConversation {
-//   conversation   TwitterDMConversation @relation(fields: [conversationId], references: [id])
-//   conversationId String
-//   include        TwitterDMInclude      @relation(fields: [includeId], references: [id])
-//   includeId      String
-//
-//   @@id([conversationId, includeId])
-// }
 
 model TwitterUser {
   id            String                  @id @unique

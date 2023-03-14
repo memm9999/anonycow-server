@@ -43,11 +43,7 @@ export default class TwitterData2 {
             async (userId) => {
                 const _uoc = {
                     id: userId,
-                    ...(userId !== this.userId ? {
-                        ...(await this.getUserData(userId))
-                    } : {
-                        ...this.userData
-                    }),
+                    data: ((userId !== this.userId) ? (await this.getUserData(userId)) : (this.userData))?.data,
                     ...(userId === this.userId ? {
                         user: {
                             connect: {
@@ -548,7 +544,7 @@ export default class TwitterData2 {
         }
     }
 
-    paginateAllOver = async function* (url, searchParams, callback = async () => {
+    paginateAllOver = async function* (url, searchParams, callback = async (page) => {
     }, nextToken = true) {
 
         let _skip = false

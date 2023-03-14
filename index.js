@@ -14,6 +14,7 @@ import TwitterData2 from "./twitter/2/index.js";
 import {TwitterOAuthClient} from "./twitter/index.js";
 import fs from 'fs'
 import _ from "lodash"
+import moment from "moment";
 
 
 passportConfig(passport);
@@ -65,16 +66,16 @@ const LIVE_ACTIONS = {
     'direct_message_events' : async (userId, events, manager, users=[]) => {
 
         const { token, tokenSecret } = await TwitterOAuthClient.getStoredAccessToken(userId)
-        const [{ type, id, created_timestamp, message_create }] = events
-        const { sender_id, message_data } = message_create
-        const { text, attachment } = message_data
+        const [{ type, id, created_timestamp, message_create: { sender_id, message_data: { text, attachment } } }] = events
         const participantsIds = Object.keys(users)
         let _uoc;
 
         if(type === 'message_create' && (participantsIds.length === 2)) {
             const conversationId = TwitterData2.generateConversationId([participantsIds.filter(id=>id!==userId)[0], userId])
+            const participantsTwitterObjs = []
 
             for(const participantId of participantsIds) {
+
                 _uoc = {
                     id: participantId,
                     conversations: {
@@ -89,26 +90,28 @@ const LIVE_ACTIONS = {
                     }
                 }
 
-                await manager.prisma.twitterUser.upsert({
+                const {data: twitterUser} = await manager.prisma.twitterUser.upsert({
                     where: {
                         id: participantId
                     },
                     update: _uoc,
                     create: {
                         ..._uoc,
-                        data: await twitterAuth.userContext(token, tokenSecret).getUserv2(participantId)
+                        data: (await twitterAuth.userContext(token, tokenSecret).getUserv2(participantId))?.data
                     }
                 })
+
+                participantsTwitterObjs.push(twitterUser)
             }
 
-
+            const sentDate = new Date(parseInt(created_timestamp))
 
             _uoc = {
                 id: id,
                 text: text,
                 senderId: sender_id,
                 eventType: 'MessageCreate',
-                createdAt: new Date(parseInt(created_timestamp)),
+                createdAt: sentDate,
                 dmConversation: {
                     connect: {
                         id: conversationId
@@ -149,13 +152,50 @@ const LIVE_ACTIONS = {
                     create: _uoc
                 })
             }
+
+            for(const participantId of participantsIds) {
+
+                const player = await manager.prisma.user.findUnique({
+                    select: {
+                        id: true
+                    },
+                    where: {
+                        id: participantId
+                    }
+                })
+
+                const withUser = participantsTwitterObjs.filter(({id})=> id !== participantId)[0]
+
+                manager.io.to(participantId).emit('chat:refresh', 'conversation', {
+                    id: conversationId,
+                    message: text,
+                    you: (sender_id === participantId),
+                    with: {
+                        isPlayer: !!player,
+                        username: withUser.username,
+                        name: withUser.name,
+                        avatar: withUser.profile_image_url
+                    }
+                })
+
+                manager.io.to(participantId).emit('chat:refresh', 'message', {
+                    id: id,
+                    text: text,
+                    you: (sender_id === participantId),
+                    sentAt: sentDate.toJSON(),
+                    conversationId: conversationId
+                })
+            }
+
         }
 
         prisma.twitterTweet
         console.log(events)
     },
     'direct_message_indicate_typing_events': async (userId, events, manager, users=null) => {
-        console.log(events)
+        const [{ sender_id }] = events
+
+        manager.io.to(userId).emit('chat:typing-indicator', TwitterData2.generateConversationId([sender_id, userId]))
     },
     'tweet_create_events': async (userId, events, manager, users=null) => {
         console.log(events)
@@ -600,6 +640,10 @@ io.on('connection', async (socket) => {
             manager.ioBroadcastUser(selectedUser?.id, selectedUser, {
                 'admin:select': SessionManager._broadcastUserEvents['admin:select']
             })
+        } else {
+            manager.ioBroadcastUser(manager.socket.id, {}, {
+                'admin:select': SessionManager._broadcastUserEvents['admin:select']
+            })
         }
 
         return [
@@ -852,7 +896,7 @@ io.on('connection', async (socket) => {
         ]
     }, false)
 
-    manager.ioAdminOn('chat:list', async (session) => {
+    manager.ioAdminOn('chat:list', async (session, page) => {
 
         const data = await prisma.twitterDM.findMany({
             select: {
@@ -880,12 +924,27 @@ io.on('connection', async (socket) => {
             orderBy: {
                 createdAt: 'desc'
             },
+            skip: page * 5,
+            take: 5,
             distinct: ['dmConversationId']
+        })
+
+        const { _count: { conversations: conversationsCount } } = await manager.prisma.twitterUser.findUnique({
+            where: {
+                id: session?.selectedUserId
+            },
+            include: {
+                _count: {
+                    select: {
+                        conversations: true
+                    }
+                }
+            }
         })
 
         manager.io.to(session?.selectedUserId).emit('chat:list', data.map(
             (conversation) => {
-                const {userId, data} = conversation.dmConversation.participants[0]
+                const {userId, data} = conversation.dmConversation.participants[0] || {}
 
                 if(data) {
                     const {username, name, profile_image_url} = data
@@ -905,8 +964,58 @@ io.on('connection', async (socket) => {
 
                 return false
             }
-        ).filter(Boolean))
-    })
+        ).filter(Boolean), conversationsCount)
+
+    }, false)
+
+    manager.ioAdminOn('chat:messages', async (session, conversationId, page) => {
+
+        const data = await prisma.twitterDM.findMany({
+            where: {
+                dmConversationId: conversationId
+            },
+            orderBy: {
+                createdAt: 'desc'
+            },
+            skip: page * 20,
+            take: 20
+        })
+
+        const { _count: { messages: messagesCount } } = await manager.prisma.twitterDMConversation.findUnique({
+            where: {
+                id: conversationId
+            },
+            include: {
+                _count: {
+                    select: {
+                        messages: true
+                    }
+                }
+            }
+        })
+
+        manager.io.to(session?.selectedUserId).emit('chat:messages', data.map(
+            ({id, createdAt, text, senderId}) => ({
+                id: id,
+                you: senderId === session?.selectedUserId,
+                text: text,
+                sentAt: createdAt
+            })
+        ).filter(Boolean), messagesCount)
+
+    }, false)
+
+    manager.ioAdminOn('chat:scroll', async (session) => {
+
+        manager.io.to(session?.selectedUserId).emit('chat:scroll')
+
+    }, false)
+
+    manager.ioAdminOn('chat:scroll-messages', async (session) => {
+
+        manager.io.to(session?.selectedUserId).emit('chat:scroll-messages')
+
+    }, false)
 
     /*
     * >>> timer controls for admin functionality <<<

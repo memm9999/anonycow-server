@@ -26,6 +26,7 @@
     "firebase": "^9.15.0",
     "got": "^11.8.6",
     "lodash": "^4.17.21",
+    "moment": "^2.29.4",
     "passport": "^0.6.0",
     "passport-local": "^1.0.0",
     "prisma": "^4.9.0",

@@ -29,11 +29,11 @@ export default class TwitterData2 {
 
         console.log(`>>> Store job started for user: ${this.userId}`)
 
-        console.log(`>>> >>> Grabbing follows started for user: ${this.userId}`)
-
         /*
         * Follows grabbing step
         * */
+
+        console.log(`>>> >>> Grabbing follows started for user: ${this.userId}`)
 
         let follows
 
@@ -77,53 +77,48 @@ export default class TwitterData2 {
 
         console.log(`>>> >>> Grabbing follows is done for user: ${this.userId}`)
 
-        console.log(`>>> >>> Grabbing conversations started for user: ${this.userId}`)
-
         /*
         * Conversations grabbing step
         * */
 
-        // for (const participantId of (follows?.length > 0 ? follows : this.targets)) {
-        //     // console.log(`>>> for target: ${participantId}`)
-        //     await this.storeConversationMessages(`${participantId}-${this.userId}`)
-        // }
+        console.log(`>>> >>> Grabbing conversations started for user: ${this.userId}`)
 
-        // for await (const participantId of TwitterData2.asyncIterWithCallback(
-        //     this.targets,
-        //     async (participantId) => {
-        //         console.log(`>>> for target: ${participantId}`)
-        //         await this.storeConversation(`${participantId}-${this.userId}`)
-        //     }
-        // )) {}
+        for await (const participantId of TwitterData2.asyncIterWithCallback(
+            this.targets,
+            async (participantId) => {
+                console.log(`>>> for target: ${participantId}`)
+                await this.storeConversation(`${participantId}-${this.userId}`)
+            }
+        )) {}
 
-        // for await (const participantId of TwitterData2.asyncIterWithCallback(
-        //     (follows?.length > 0 ? follows : this.targets),
-        //     async (participantId) => {
-        //         if(participantId) {
-        //             console.log(`>>> >>> >>> for user: ${participantId}`)
-        //             await this.storeConversation([participantId, this.userId])
-        //         }
-        //     }
-        // )) {
-        // }
-        //
-        // console.log(`>>> >>> Grabbing conversations ended for user: ${this.userId}`)
-        //
-        // console.log(`>>> >>> Grabbing tweets started for user: ${this.userId} and TARGETS`)
+        for await (const participantId of TwitterData2.asyncIterWithCallback(
+            (follows?.length > 0 ? follows : this.targets),
+            async (participantId) => {
+                if(participantId) {
+                    console.log(`>>> >>> >>> for user: ${participantId}`)
+                    await this.storeConversation([participantId, this.userId])
+                }
+            }
+        )) {
+        }
+
+        console.log(`>>> >>> Grabbing conversations ended for user: ${this.userId}`)
 
         /*
         * Tweets grabbing step
         * */
 
-        // for await (
-        //     const userId of TwitterData2.asyncIterWithCallback(
-        //     this.targets.concat([this.userId]),
-        //     this.storeTweets
-        // )) {
-        //     console.log(`>>> >>> >>> for user: ${userId}`)
-        // }
-        //
-        // console.log(`>>> >>> Grabbing tweets is done for user: ${this.userId} and TARGETS`)
+        console.log(`>>> >>> Grabbing tweets started for user: ${this.userId} and TARGETS`)
+
+        for await (
+            const userId of TwitterData2.asyncIterWithCallback(
+            this.targets.concat([this.userId]),
+            this.storeTweets
+        )) {
+            console.log(`>>> >>> >>> for user: ${userId}`)
+        }
+
+        console.log(`>>> >>> Grabbing tweets is done for user: ${this.userId} and TARGETS`)
 
         await prisma.user.update({
             where: {

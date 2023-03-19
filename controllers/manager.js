@@ -3,7 +3,7 @@ import {Session} from "./session/session.js";
 import crypto from "crypto";
 import cookieParser from "cookie-parser"
 import session from "./session/middleware.js";
-import { serialize } from "cookie";
+import {serialize} from "cookie";
 
 export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready', 'fortuneOrder', 'totalProcesses']
 
@@ -322,9 +322,7 @@ export class SessionManager {
                 }
             }
 
-            const _data = await this.createData(this.prisma.process, dataObj)
-
-            return _data
+            return await this.createData(this.prisma.process, dataObj)
         }
 
     }
@@ -333,27 +331,31 @@ export class SessionManager {
         let _handler;
 
         _handler = async function () {
-            /*
-            * Returns: Process object for a later usage
-            * */
-            const session = await this.session.get()
+            try {
+                /*
+                * Returns: Process object for a later usage
+                * */
+                const session = await this.session.get()
 
-            // console.log(session)
+                // console.log(session)
 
-            if(admin) {
-                this.io.to(this.socket.id).emit('admin:get', session?.admin ? SessionManager._specifyKeys(['username'])(session?.admin) : {})
-                if(!session?.admin?.id) {
-                    return undefined
+                if(admin) {
+                    this.io.to(this.socket.id).emit('admin:get', session?.admin ? SessionManager._specifyKeys(['username'])(session?.admin) : {})
+                    if(!session?.admin?.id) {
+                        return undefined
+                    }
                 }
+
+                const _process = await handler(session, ...arguments)
+
+                if(session?.userId && broadcastProcesses) {
+                    await this.ioBroadcastProcessesRefresh(session?.userId)
+                }
+
+                return await this.saveProcessRecord(action, _process)
+            } catch (err) {
+                console.log(err)
             }
-
-            const _process = await handler(session, ...arguments)
-
-            if(session?.userId && broadcastProcesses) {
-                await this.ioBroadcastProcessesRefresh(session?.userId)
-            }
-
-            return await this.saveProcessRecord(action, _process)
         }
 
         return _handler.bind.bind(_handler)(this)

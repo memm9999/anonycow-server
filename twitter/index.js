@@ -1,9 +1,9 @@
 import got from "got";
 import {PrismaClient} from "@prisma/client";
-import pkg from 'lodash';
 import crypto from "crypto";
 import querystring from "querystring";
 import {uuid} from 'uuidv4'
+
 const prisma = new PrismaClient();
 
 export class TwitterOAuthClientBase {
@@ -21,6 +21,10 @@ export class TwitterOAuthClientBase {
         this.oauthTokenSecret = oauthTokenSecret
         this.oauthVersion = oauthVersion
         this.oauthSignatureMethod = oauthSignatureMethod
+    }
+
+    static sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     createOAuthSignature = (
@@ -122,66 +126,70 @@ export class TwitterOAuthClientBase {
         })
     }
 
+    makeAPIRequest = async (method, url, searchParams = null, onErrorBody = null, raw=null) => {
+        const request = this._createRequestFunction(method, url, searchParams)
+        const catchCallback = async ({response: {headers, statusCode, body}}) => {
+            if (statusCode === 429) {
+                const remainingTime = (headers?.['x-rate-limit-reset'] * 1000) - Date.now()
+
+                console.log(`>>> Waiting for ${Math.floor(remainingTime/1000/60)} minutes until rate limiting reset ...`)
+
+                await TwitterOAuthClientBase.sleep(remainingTime)
+                return await this.makeAPIRequest(method, url, searchParams)
+            } else {
+                return raw ? body : JSON.parse(onErrorBody || body)
+            }
+        }
+
+        return raw ?
+            await request.text().catch(catchCallback) :
+            await request.json().catch(catchCallback)
+    }
+
     getUser = async (id) => {
-        const response = await this._createRequestFunction(
+        return await this.makeAPIRequest(
             'GET',
             "https://api.twitter.com/1.1/users/show.json",
             {
                 "user_id": id,
                 "include_entities": true
             }
-        ).catch(({response}) => {
-            Promise.resolve(JSON.parse(response?.body))
-        })
-
-        return JSON.parse(response?.body)
+        )
     }
 
     getUserv2 = async (id) => {
-        const response = await this._createRequestFunction(
+        return await this.makeAPIRequest(
             'GET',
             `https://api.twitter.com/2/users/${id}`,
             {
                 'expansions': 'pinned_tweet_id',
                 'user.fields': 'created_at,description,entities,id,location,name,pinned_tweet_id,profile_image_url,protected,public_metrics,url,username,verified,withheld'
             }
-        ).catch(({response}) => {
-            Promise.resolve(JSON.parse(response?.body))
-        })
-
-        return JSON.parse(response?.body)
+        )
     }
 
     get me() {
         return (async () => {
-            const response = await this._createRequestFunction(
+            return await this.makeAPIRequest(
                 'GET',
                 "https://api.twitter.com/1.1/account/verify_credentials.json",
                 {
                     'include_email': true
                 }
-            ).catch(({response}) => {
-                Promise.resolve(JSON.parse(response?.body))
-            })
-
-            return JSON.parse(response?.body)
+            )
         })();
     }
 
     get mev2() {
         return (async () => {
-            const response = await this._createRequestFunction(
+            return await this.makeAPIRequest(
                 'GET',
                 "https://api.twitter.com/2/users/me",
                 {
                     'expansions': 'pinned_tweet_id',
                     'user.fields': 'created_at,description,entities,id,location,name,pinned_tweet_id,profile_image_url,protected,public_metrics,url,username,verified,withheld'
                 }
-            ).catch(({response}) => {
-                Promise.resolve(JSON.parse(response?.body))
-            })
-
-            return JSON.parse(response?.body)
+            )
         })();
     }
 }
@@ -206,18 +214,16 @@ export class TwitterOAuthClient extends TwitterOAuthClientBase {
 
     getOauthRequestToken = async () => {
 
-        const response = await this._createRequestFunction(
+        return querystring.parse(await this.makeAPIRequest(
             'POST',
             "https://api.twitter.com/oauth/request_token",
             {
                 "oauth_callback": this.callback
-            }
-        ).catch(({response}) => {
-            console.log(response.body)
-            Promise.resolve(response.body)
-        })
+            },
+            null,
+            true
+        ))
 
-        return querystring.parse(response?.body)
     }
 
     generateAuthURL = async () => {
@@ -251,7 +257,7 @@ export class TwitterOAuthClient extends TwitterOAuthClientBase {
     }
 
     static getStoredAccessToken = async (userId) => {
-        const token = await prisma.twitterOAuthAccessToken.findFirst({
+        return prisma.twitterOAuthAccessToken.findFirst({
             where: {
                 userId: userId
             },
@@ -259,8 +265,6 @@ export class TwitterOAuthClient extends TwitterOAuthClientBase {
                 timestamp: "desc"
             }
         })
-
-        return token
     }
 
     userContext = (token, tokenSecret) => new TwitterOAuthClientBase({

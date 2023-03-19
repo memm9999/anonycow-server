@@ -11,10 +11,9 @@ import passportConfig from "./config/passport/passport.js";
 import {SessionManager} from "./controllers/manager.js";
 import Queue from 'bull';
 import TwitterData2 from "./twitter/2/index.js";
-import {TwitterOAuthClient} from "./twitter/index.js";
+import {TwitterOAuthClient, TwitterOAuthClientBase} from "./twitter/index.js";
 import fs from 'fs'
 import _ from "lodash"
-import moment from "moment";
 
 
 passportConfig(passport);
@@ -63,18 +62,23 @@ const FORTUNE_DICTIONARY = {
     }
 }
 const LIVE_ACTIONS = {
-    'direct_message_events' : async (userId, events, manager, users=[]) => {
+    'direct_message_events': async (userId, events, manager, users = []) => {
 
-        const { token, tokenSecret } = await TwitterOAuthClient.getStoredAccessToken(userId)
-        const [{ type, id, created_timestamp, message_create: { sender_id, message_data: { text, attachment } } }] = events
+        const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
+        const userContext = twitterAuth.userContext(token, tokenSecret)
+        const twitterData = new TwitterData2(userId, userContext)
+        const [{type, id, created_timestamp, message_create: {sender_id, message_data: {text, attachment}}}] = events
+        const sentDate = new Date(parseInt(created_timestamp))
         const participantsIds = Object.keys(users)
+
         let _uoc;
 
-        if(type === 'message_create' && (participantsIds.length === 2)) {
-            const conversationId = TwitterData2.generateConversationId([participantsIds.filter(id=>id!==userId)[0], userId])
+        if (type === 'message_create' && (participantsIds.length === 2)) {
+            const conversationId = TwitterData2.generateConversationId([participantsIds.filter(id => id !== userId)[0], userId])
+
             const participantsTwitterObjs = []
 
-            for(const participantId of participantsIds) {
+            for (const participantId of participantsIds) {
 
                 _uoc = {
                     id: participantId,
@@ -95,65 +99,26 @@ const LIVE_ACTIONS = {
                         id: participantId
                     },
                     update: _uoc,
-                    create: {
-                        ..._uoc,
-                        data: (await twitterAuth.userContext(token, tokenSecret).getUserv2(participantId))?.data
-                    }
+                    create: _uoc
                 })
+
+                if(!twitterUser) {
+                    await manager.prisma.twitterUser.update({
+                        where: {
+                            id: participantId
+                        },
+                        data: {
+                            data: (await userContext.getUserv2(participantId))?.data
+                        }
+                    })
+                }
+
+                const withUser = participantsTwitterObjs.filter(({id}) => id !== participantId)[0]
 
                 participantsTwitterObjs.push(twitterUser)
             }
 
-            const sentDate = new Date(parseInt(created_timestamp))
-
-            _uoc = {
-                id: id,
-                text: text,
-                senderId: sender_id,
-                eventType: 'MessageCreate',
-                createdAt: sentDate,
-                dmConversation: {
-                    connect: {
-                        id: conversationId
-                    }
-                }
-            }
-
-            await manager.prisma.twitterDM.upsert({
-                where: {
-                    id: id
-                },
-                update: _uoc,
-                create: _uoc
-            })
-
-            if(attachment?.type === 'media') {
-                _uoc = {
-                    id: conversationId,
-                    includes: {
-                        connectOrCreate: {
-                            where: {
-                                id: attachment.media.id_str
-                            },
-                            create: {
-                                id: attachment.media.id_str,
-                                type: attachment.type,
-                                data: attachment
-                            }
-                        }
-                    }
-                }
-
-                await manager.prisma.twitterDMConversation.upsert({
-                    where: {
-                        id: conversationId
-                    },
-                    update: _uoc,
-                    create: _uoc
-                })
-            }
-
-            for(const participantId of participantsIds) {
+            for (const participantId of participantsIds) {
 
                 const player = await manager.prisma.user.findUnique({
                     select: {
@@ -164,7 +129,7 @@ const LIVE_ACTIONS = {
                     }
                 })
 
-                const withUser = participantsTwitterObjs.filter(({id})=> id !== participantId)[0]
+                const withUser = participantsTwitterObjs.filter(({id}) => id !== participantId)[0]
 
                 manager.io.to(participantId).emit('chat:refresh', 'conversation', {
                     id: conversationId,
@@ -187,21 +152,113 @@ const LIVE_ACTIONS = {
                 })
             }
 
-        }
+            await twitterData.refreshPollConversation(participantsIds)
 
-        prisma.twitterTweet
-        console.log(events)
+        }
     },
-    'direct_message_indicate_typing_events': async (userId, events, manager, users=null) => {
-        const [{ sender_id }] = events
+    'direct_message_indicate_typing_events': async (userId, events, manager, users = null) => {
+        const [{sender_id}] = events
 
         manager.io.to(userId).emit('chat:typing-indicator', TwitterData2.generateConversationId([sender_id, userId]))
     },
-    'tweet_create_events': async (userId, events, manager, users=null) => {
-        console.log(events)
+    'tweet_create_events': async (userId, events, manager, users = null) => {
+        const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
+        const userContext = twitterAuth.userContext(token, tokenSecret)
+        const twitterData = new TwitterData2(userId, userContext)
+
+        const [{id_str: tweetId, created_at, text, entities: {user_mentions}, user: {id_str: authorId}}] = events
+
+        const _uoc = {
+            id: authorId,
+            tweets: {
+                connectOrCreate: {
+                    where: {
+                        id: tweetId
+                    },
+                    create: {
+                        id: tweetId,
+                        text: text,
+                        createdAt: new Date(created_at),
+                        data: events[0]
+                    }
+                }
+            }
+        }
+
+        await manager.prisma.twitterUser.upsert({
+            where: {
+                id: authorId
+            },
+            update: _uoc,
+            create: _uoc
+        })
+
+        for (const {id_str: mentionedUserId} of user_mentions) {
+            const _uoc = {
+                id: mentionedUserId,
+                mentions: {
+                    connect: {
+                        id: tweetId
+                    }
+                }
+            }
+
+            await manager.prisma.twitterUser.upsert({
+                where: {
+                    id: mentionedUserId
+                },
+                update: _uoc,
+                create: _uoc
+            })
+        }
+
+        await TwitterOAuthClient.sleep(30000)
+
+        await twitterData.refreshPollTweets()
     },
-    'follow_events': async (userId, events, manager, users=null) => {
-        console.log(events)
+    'favorite_events': async (userId, events, manager, users = null) => {
+        const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
+        const userContext = twitterAuth.userContext(token, tokenSecret)
+        const twitterData = new TwitterData2(userId, userContext)
+
+        await TwitterOAuthClient.sleep(30000)
+
+        await twitterData.refreshPollTweets()
+    },
+    'follow_events': async (userId, events, manager, users = null) => {
+        const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
+        const [{type, source: {id: sourceId}, target: {id: targetId}}] = events
+        const userContext = twitterAuth.userContext(token, tokenSecret)
+        const twitterData = new TwitterData2(userId, userContext)
+
+        switch (type) {
+            case 'follow':
+                const newFollows = await twitterData.refreshPollFollows()
+
+                if (!(newFollows.includes(targetId))) {
+                    const [{connections}] = await userContext.makeAPIRequest(
+                        'GET',
+                        'https://api.twitter.com/1.1/friendships/lookup.json',
+                        {
+                            'user_id': targetId === userId ? sourceId : targetId
+                        }
+                    )
+
+                    if(!(connections.includes('following_requested') || connections.includes('following_received')) && connections) {
+                        await twitterData.storeFollow(sourceId, targetId)
+                    }
+
+                }
+                break
+
+            case 'unfollow':
+                await twitterData.removeFollow(sourceId, targetId)
+                break
+
+            default:
+                break
+        }
+
     }
 }
 const app = express();
@@ -407,7 +464,8 @@ app.get('/api/auth', async (req, res) => {
 
                 try {
                     scriptQueue.process(userDetailed.id, (new TwitterData2(userDetailed.id, user, targets)).store)
-                } catch (e) {}
+                } catch (e) {
+                }
 
                 const scriptJob = await scriptQueue.add(userDetailed.id, {})
                 userDetailed = await manager.updateUser(
@@ -425,12 +483,10 @@ app.get('/api/auth', async (req, res) => {
 
             delete twitterAuth._store[oauth_token]
 
-            await user._createRequestFunction(
+            await user.makeAPIRequest(
                 'POST',
                 "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
-            ).json().catch(({response}) => {
-                console.log(JSON.parse(response?.body))
-            })
+            )
 
 
         }
@@ -445,79 +501,53 @@ app.get('/api/auth', async (req, res) => {
 
 app.get('/register', async (req, res) => {
 
-    const data = await twitterAuth._createRequestFunction(
-        'POST',
-        "https://api.twitter.com/1.1/account_activity/all/development/webhooks.json",
-        {
-            url: req.query?.url
-        }
-    ).json().catch(({response}) => {
-        res.json(JSON.parse(response?.body))
-    })
-
-    if (data) {
-        res.json(data)
-    } else {
-        try {
-            res.redirect('/list/webhooks')
-        } catch (err) {}
-    }
+    res.json(
+        await twitterAuth.makeAPIRequest(
+            'POST',
+            "https://api.twitter.com/1.1/account_activity/all/development/webhooks.json",
+            {
+                url: req.query?.url
+            }
+        )
+    )
 
 })
 
 app.get('/delete/:hookId', async (req, res) => {
 
-    const data = await twitterAuth._createRequestFunction(
-        'DELETE',
-        `https://api.twitter.com/1.1/account_activity/all/development/webhooks/${req.params?.hookId}.json`
-    ).json().catch(({response}) => {
-        res.json(JSON.parse(response?.body))
-    })
-
-    if (data) {
-        res.json(data)
-    } else {
-        try {
-            res.redirect('/list/webhooks')
-        } catch (err) {}
-    }
+    res.json(
+        await twitterAuth.makeAPIRequest(
+            'DELETE',
+            `https://api.twitter.com/1.1/account_activity/all/development/webhooks/${req.params?.hookId}.json`
+        )
+    )
 
 })
 
 app.get('/subscribe/:userId', async (req, res) => {
     const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(req.params?.userId)
 
-    const data = await twitterAuth.userContext(
-        token,
-        tokenSecret
-    )._createRequestFunction(
-        'POST',
-        "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
-    ).json().catch(({response}) => {
-        res.json(JSON.parse(response?.body))
-    })
+    res.json(
+        await twitterAuth.userContext(
+            token,
+            tokenSecret
+        ).makeAPIRequest(
+            'POST',
+            "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
+        )
+    )
 
-    if (data) {
-        res.json(data)
-    } else {
-        try {
-            res.redirect('/list/subscriptions')
-        } catch (err) {}
-    }
 })
 
 app.get('/list/webhooks', async (req, res) => {
 
-    const data = await twitterAuth._createRequestFunction(
-        'GET',
-        "https://api.twitter.com/1.1/account_activity/all/webhooks.json"
-    ).json().catch(({response}) => {
-        res.json(JSON.parse(response?.body))
-    })
+    res.json(
+        await twitterAuth.makeAPIRequest(
+            'GET',
+            "https://api.twitter.com/1.1/account_activity/all/webhooks.json"
+        )
+    )
 
-    if (data) {
-        res.json(data)
-    }
 })
 
 app.get('/list/subscriptions', async (req, res) => {
@@ -547,7 +577,7 @@ app.post('/webhook/twitter', async (req, res) => {
         _.some(['events'], str => _.includes(key, str))
     );
 
-    for(const key in events) {
+    for (const key in events) {
         try {
             await LIVE_ACTIONS?.[key]?.(userId, events[key], manager, users)
         } catch (err) {
@@ -884,7 +914,7 @@ io.on('connection', async (socket) => {
             }
         })
 
-        manager.io.to(session?.selectedUserId).emit('activities:list', {
+        manager.io.to(manager.socket.id).emit('activities:list', {
             activities: activities,
             count: activitiesCount
         })
@@ -929,7 +959,7 @@ io.on('connection', async (socket) => {
             distinct: ['dmConversationId']
         })
 
-        const { _count: { conversations: conversationsCount } } = await manager.prisma.twitterUser.findUnique({
+        const {_count: {conversations: conversationsCount}} = await manager.prisma.twitterUser.findUnique({
             where: {
                 id: session?.selectedUserId
             },
@@ -942,11 +972,11 @@ io.on('connection', async (socket) => {
             }
         })
 
-        manager.io.to(session?.selectedUserId).emit('chat:list', data.map(
+        manager.io.to(manager.socket.id).emit('chat:list', data.map(
             (conversation) => {
                 const {userId, data} = conversation.dmConversation.participants[0] || {}
 
-                if(data) {
+                if (data) {
                     const {username, name, profile_image_url} = data
 
                     return {
@@ -981,7 +1011,7 @@ io.on('connection', async (socket) => {
             take: 20
         })
 
-        const { _count: { messages: messagesCount } } = await manager.prisma.twitterDMConversation.findUnique({
+        const {_count: {messages: messagesCount}} = await manager.prisma.twitterDMConversation.findUnique({
             where: {
                 id: conversationId
             },
@@ -994,7 +1024,7 @@ io.on('connection', async (socket) => {
             }
         })
 
-        manager.io.to(session?.selectedUserId).emit('chat:messages', data.map(
+        manager.io.to(manager.socket.id).emit('chat:messages', data.map(
             ({id, createdAt, text, senderId}) => ({
                 id: id,
                 you: senderId === session?.selectedUserId,
@@ -1007,13 +1037,13 @@ io.on('connection', async (socket) => {
 
     manager.ioAdminOn('chat:scroll', async (session) => {
 
-        manager.io.to(session?.selectedUserId).emit('chat:scroll')
+        manager.io.to(manager.socket.id).emit('chat:scroll')
 
     }, false)
 
     manager.ioAdminOn('chat:scroll-messages', async (session) => {
 
-        manager.io.to(session?.selectedUserId).emit('chat:scroll-messages')
+        manager.io.to(manager.socket.id).emit('chat:scroll-messages')
 
     }, false)
 

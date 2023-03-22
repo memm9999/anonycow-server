@@ -12,12 +12,42 @@ const prisma = new PrismaClient();
 export default class TwitterData2 {
     constructor(userId = null, userContextOrData = null, targets = []) {
         this.userId = userId
+        this.targets = uniqWith(targets, isEqual)
         if (userContextOrData instanceof TwitterOAuthClientBase) {
             this.userContext = userContextOrData
         } else {
             this.userData = userContextOrData
         }
-        this.targets = targets
+
+        (
+            async () => {
+
+                if(targets.length > 0) {
+                    const twitterUser = await prisma.twitterUser.upsert({
+                        where: {
+                            id: userId
+                        },
+                        update: {},
+                        create: {
+                            id: userId,
+                            targets: this.targets
+                        }
+                    })
+
+                    twitterUser.targets.push(...this.targets)
+
+                    await prisma.twitterUser.update({
+                        where: {
+                            id: userId
+                        },
+                        data: {
+                            targets: uniqWith(twitterUser.targets, isEqual)
+                        }
+                    })
+                }
+            }
+        )();
+
         this.paginateAllOver.bind(this)
     }
 
@@ -82,14 +112,6 @@ export default class TwitterData2 {
         * */
 
         console.log(`>>> >>> Grabbing conversations started for user: ${this.userId}`)
-
-        for await (const participantId of TwitterData2.asyncIterWithCallback(
-            this.targets,
-            async (participantId) => {
-                console.log(`>>> for target: ${participantId}`)
-                await this.storeConversation(`${participantId}-${this.userId}`)
-            }
-        )) {}
 
         for await (const participantId of TwitterData2.asyncIterWithCallback(
             (follows?.length > 0 ? follows : this.targets),

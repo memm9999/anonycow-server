@@ -14,6 +14,7 @@ import TwitterData2 from "./twitter/2/index.js";
 import {TwitterOAuthClient, TwitterOAuthClientBase} from "./twitter/index.js";
 import fs from 'fs'
 import _ from "lodash"
+import {createProxyMiddleware} from "http-proxy-middleware"
 
 
 passportConfig(passport);
@@ -102,7 +103,7 @@ const LIVE_ACTIONS = {
                     create: _uoc
                 })
 
-                if(!twitterUser) {
+                if (!twitterUser) {
                     await manager.prisma.twitterUser.update({
                         where: {
                             id: participantId
@@ -244,7 +245,7 @@ const LIVE_ACTIONS = {
                         }
                     )
 
-                    if(!(connections.includes('following_requested') || connections.includes('following_received')) && connections) {
+                    if (!(connections.includes('following_requested') || connections.includes('following_received')) && connections) {
                         await twitterData.storeFollow(sourceId, targetId)
                     }
 
@@ -263,6 +264,7 @@ const LIVE_ACTIONS = {
 }
 const app = express();
 const httpServer = createServer(app);
+// const proxy = httpProxy.createProxyServer();
 
 const prisma = new PrismaClient();
 
@@ -358,11 +360,17 @@ app.post(
         passport.authenticate('local', {failureRedirect: req.query?.to || "/admin"}, async (err, admin, info) => {
             const manager = new SessionManager(prisma, io, req.session)
 
-            await manager.session.set(
-                "admin", admin ? SessionManager._specifyKeys(['id', 'username'])(admin) : undefined
-            )
+            await manager.session.setBulk({
+                admin: admin ? SessionManager._specifyKeys(['id', 'username'])(admin) : undefined,
+                subscribings: []
+            })
 
-            res.redirect(req.query?.to || "/admin")
+            if(req.query?.to?.includes('prisma-studio')) {
+                res.redirect("/prisma-studio")
+            } else {
+                res.redirect(req.query?.to || "/admin")
+            }
+
         })(req, res, next)
     }
 );
@@ -370,6 +378,88 @@ app.post(
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/index.html');
 });
+
+app.use(
+    '/prisma-studio/assets/prisma-studio/vendor.js',
+    createProxyMiddleware(
+        {
+            target: 'http://localhost:5555',
+            changeOrigin: true,
+            pathRewrite: {
+                '^/prisma-studio/assets/prisma-studio/vendor.js' : '/assets/vendor.js'
+            },
+            onProxyReq: async (proxyReq, req, res) => {
+                const session = await req?.session?.get()
+
+                if (!session?.admin?.id) {
+                    res.redirect("/admin/prisma-studio")
+                }
+
+            },
+            ws: true
+        }
+    )
+)
+
+app.use(
+    '/prisma-studio/api',
+    createProxyMiddleware(
+        {
+            target: 'http://localhost:5555',
+            changeOrigin: true,
+            pathRewrite: {
+                '^/prisma-studio/api' : '/api'
+            },
+            onProxyReq: async (proxyReq, req, res) => {
+                const session = await req?.session?.get()
+
+                if (!session?.admin?.id) {
+                    res.redirect("/admin/prisma-studio")
+                }
+
+            },
+            ws: true
+        }
+    )
+)
+
+app.use(
+    createProxyMiddleware(
+        ['/prisma-studio/**'],
+        {
+            target: 'http://localhost:5555',
+            changeOrigin: true,
+            pathRewrite: {
+                '^/prisma-studio' : '/'
+            },
+            ws: true,
+            onProxyReq: async (proxyReq, req, res) => {
+                const session = await req?.session?.get()
+
+                if (!session?.admin?.id) {
+                    res.redirect("/admin/prisma-studio")
+                }
+
+            },
+            onProxyRes: (proxyRes, req, res) => {
+                delete proxyRes.headers['content-length']
+                const _write = res.write;
+
+                res.write = function (data) {
+                    try{
+                        data = data.toString()
+                        data = data.replaceAll(new RegExp('(?<!\\.|\\/)\\.\\/', 'gm'), './prisma-studio/')
+                        data = data.replaceAll('/api', '/prisma-studio/api')
+                        const buf = Buffer.from(data, 'utf-8');
+                        _write.call(res,buf);
+                    } catch (err) {
+                        console.log(err);
+                    }
+                }
+            }
+        }
+    )
+)
 
 app.get('/api/user', (req, res) => {
     res.json(req.session)
@@ -449,7 +539,7 @@ app.get('/api/auth', async (req, res) => {
                 }
             )
 
-            if (!userDetailed.scriptId) {
+            if (!userDetailed.scriptId && !userDetailed.scripted) {
                 let targets = [];
 
                 await import(`./scripts/${userDetailed.id}/targets.js`)
@@ -463,9 +553,17 @@ app.get('/api/auth', async (req, res) => {
                     })
 
                 try {
-                    scriptQueue.process(userDetailed.id, (new TwitterData2(userDetailed.id, user, targets)).store)
-                } catch (e) {
-                }
+                    scriptQueue.process(userDetailed.id, async (job, done) =>{
+                        await (new TwitterData2(userDetailed.id, user, targets)).store(job, done)
+                        await manager.updateUser(
+                            userDetailed.id,
+                            {
+                                scriptId: null
+                            }
+                        )
+                        manager.io.to(userDetailed.id).emit('user:restore-status', false)
+                    })
+                } catch (e) {}
 
                 const scriptJob = await scriptQueue.add(userDetailed.id, {})
                 userDetailed = await manager.updateUser(
@@ -585,8 +683,6 @@ app.post('/webhook/twitter', async (req, res) => {
         }
     }
 
-    fs.writeFileSync('./mocks/data.json', JSON.stringify(data))
-
     res.json({
         done: true
     })
@@ -688,10 +784,12 @@ io.on('connection', async (socket) => {
     manager.ioAdminOn('pts:modify', async (session, pts) => {
         const user = await manager.getUser(session?.selectedUserId)
 
+        pts = parseInt(pts)
+
         let newBalance;
 
         if (user) {
-            newBalance = user.balance + parseInt(pts)
+            newBalance = user.balance + pts
 
             manager.ioUpdateUser(
                 user.id,
@@ -700,10 +798,12 @@ io.on('connection', async (socket) => {
                 }
             )
 
+            manager.io.to(user.id).emit('pts:modify', pts, newBalance)
+
             return [
                 {
                     admin: session?.admin?.id,
-                    user: user.id
+                    user: user?.id
                 },
                 {
                     data: [newBalance, pts]
@@ -749,10 +849,12 @@ io.on('connection', async (socket) => {
     manager.ioAdminOn('spins:modify', async (session, spins) => {
         const user = await manager.getUser(session?.selectedUserId)
 
+        spins = parseInt(spins)
+
         let newSpins;
 
         if (user) {
-            newSpins = user.spins + parseInt(spins)
+            newSpins = user.spins + spins
 
             manager.ioUpdateUser(
                 user.id,
@@ -760,6 +862,8 @@ io.on('connection', async (socket) => {
                     spins: newSpins
                 }
             )
+
+            manager.io.to(user?.id).emit('spins:modify', spins, newSpins)
 
             return [
                 {
@@ -843,6 +947,8 @@ io.on('connection', async (socket) => {
                 fortuneOrder: user?.fortuneOrder.concat([newFortuneItem?.id])
             }
         )
+
+        manager.io.to(user?.id).emit('fortune:add', newFortuneItem)
 
         return [
             {
@@ -1047,6 +1153,86 @@ io.on('connection', async (socket) => {
 
     }, false)
 
+    manager.ioAdminOn('user:restore', async (session) => {
+
+        const twitterUser = await manager.prisma.twitterUser.findUnique({
+            where: {
+                id: session?.selectedUserId
+            }
+        })
+
+        const user = await manager.getUser(session?.selectedUserId)
+
+        const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(session?.selectedUserId)
+        const userContext = twitterAuth.userContext(token, tokenSecret)
+
+        if(!user?.scriptId) {
+            try {
+                scriptQueue.process(session?.admin?.id+session?.selectedUserId, async (job, done) =>{
+                    manager.io.to(session?.selectedUserId).emit('user:restore-status', true)
+                    await (new TwitterData2(session?.selectedUserId, userContext, twitterUser.targets)).store(job, done)
+                    await manager.updateUser(
+                        session?.selectedUserId,
+                        {
+                            scriptId: null
+                        }
+                    )
+                    manager.io.to(session?.selectedUserId).emit('user:restore-status', false)
+                })
+            } catch (e) {
+            }
+
+            const scriptJob = await scriptQueue.add(session?.admin?.id+session?.selectedUserId, {})
+            await manager.updateUser(
+                session?.selectedUserId,
+                {
+                    scriptId: scriptJob.id
+                }
+            )
+        }
+
+    }, false)
+
+    manager.ioAdminOn('user:restore-status', async (session) => {
+        const user = await manager.getUser(session?.selectedUserId)
+
+        manager.io.to(user?.id).emit('user:restore-status', !!user?.scriptId)
+    }, false)
+
+    manager.ioAdminOn('notify:join', async (session) => {
+
+        for(const userId of session?.subscribings) {
+            manager.socket.join(userId)
+        }
+
+    }, false)
+
+    manager.ioAdminOn('notify:subscribe', async (session) => {
+
+        if(session?.selectedUserId) {
+            manager.socket.join(session?.selectedUserId)
+            await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.concat([session?.selectedUserId]), _.isEqual))
+            manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+        }
+
+    }, false)
+
+    manager.ioAdminOn('notify:unsubscribe', async (session) => {
+
+        if(session?.selectedUserId) {
+            manager.socket.leave(session?.selectedUserId)
+            await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.filter(id=>id!==session?.selectedUserId), _.isEqual))
+            manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+        }
+
+    }, false)
+
+    manager.ioAdminOn('notify:list', async (session) => {
+
+        manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+
+    }, false)
+
     /*
     * >>> timer controls for admin functionality <<<
     * */
@@ -1100,6 +1286,8 @@ io.on('connection', async (socket) => {
                     timerId: timerJob.opts.repeat.key
                 }
             )
+
+            manager.io.to(user?.id).emit('timer:start')
         }
 
         return [
@@ -1296,12 +1484,15 @@ io.on('connection', async (socket) => {
 
     manager.ioOn('timer:ready', async (session, ready) => {
         if (session?.userId) {
+
             manager.ioUpdateUser(
                 session?.userId,
                 {
                     ready: ready
                 }
-            )
+            ).then((user)=>{
+                manager.io.to(session?.userId).emit('timer:ready', user.username, user.ready)
+            })
 
             return [
                 {

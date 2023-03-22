@@ -25,6 +25,8 @@
     "express-session": "^1.17.3",
     "firebase": "^9.15.0",
     "got": "^11.8.6",
+    "http-proxy": "^1.18.1",
+    "http-proxy-middleware": "^2.0.6",
     "lodash": "^4.17.21",
     "moment": "^2.29.4",
     "passport": "^0.6.0",

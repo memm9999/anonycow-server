@@ -95,6 +95,7 @@ model TwitterUser {
   mostRecentFollowerId  String?
   mostRecentFollowingId String?
   data                  Json?
+  targets               String[]
 }
 
 model TwitterTweet {

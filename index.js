@@ -11,57 +11,15 @@ import passportConfig from "./config/passport/passport.js";
 import {SessionManager} from "./controllers/manager.js";
 import Queue from 'bull';
 import TwitterData2 from "./twitter/2/index.js";
-import {TwitterOAuthClient, TwitterOAuthClientBase} from "./twitter/index.js";
-import fs from 'fs'
+import {TwitterOAuthClient} from "./twitter/index.js";
 import _ from "lodash"
 import {createProxyMiddleware} from "http-proxy-middleware"
-
+import FORTUNE_DICTIONARY from "./config/settings/fortune/dictionary.js"
+import {resolve} from "path"
 
 passportConfig(passport);
-const PORT = 5000
-const FORTUNE_DISCOUNT = 1000
-const FORTUNE_DICTIONARY = {
-    T: (manager, user, times) => {
-        manager.ioUpdateUser(
-            user.id,
-            {
-                balance: parseInt(user.balance * times)
-            }
-        ).then(user => {
-            manager.saveProcessRecord(
-                "pts:modify",
-                [
-                    {user: user.id},
-                    {
-                        data: user.balance * times
-                    }
-                ]
-            )
-        })
-    },
-    S: (manager, user, n) => {
-        manager.ioUpdateUser(
-            user.id,
-            {
-                spins: parseInt(user.spins + n)
-            }
-        ).then(user => {
-            manager.saveProcessRecord(
-                "spins:modify",
-                [
-                    {user: user.id},
-                    {
-                        data: user.spins + n
-                    }
-                ]
-            )
-        })
-    },
-    J: (manager, user, arg) => {
-    },
-    N: (manager, user, arg) => {
-    }
-}
+
+const TWITTER_WEBHOOKS_REGISTERATION_URL_PATHNAME = (new URL(process.env.TWITTER_WEBHOOKS_REGISTERATION_URL)).pathname
 const LIVE_ACTIONS = {
     'direct_message_events': async (userId, events, manager, users = []) => {
 
@@ -71,10 +29,21 @@ const LIVE_ACTIONS = {
         const [{type, id, created_timestamp, message_create: {sender_id, message_data: {text, attachment}}}] = events
         const sentDate = new Date(parseInt(created_timestamp))
         const participantsIds = Object.keys(users)
+        const subscribedUser = users[userId]
+        const senderUser = users[sender_id]
 
         let _uoc;
 
         if (type === 'message_create' && (participantsIds.length === 2)) {
+            manager.sendNotification(
+                userId + '-admin',
+                {
+                    title: `@${subscribedUser.screen_name} have a new chat`,
+                    body: `@${senderUser.screen_name}: ${text}`,
+                    image: subscribedUser.profile_image_url.replace('_normal', '')
+                }
+            )
+
             const conversationId = TwitterData2.generateConversationId([participantsIds.filter(id => id !== userId)[0], userId])
 
             const participantsTwitterObjs = []
@@ -157,17 +126,34 @@ const LIVE_ACTIONS = {
 
         }
     },
-    'direct_message_indicate_typing_events': async (userId, events, manager, users = null) => {
+    'direct_message_indicate_typing_events': async (userId, events, manager, users = []) => {
         const [{sender_id}] = events
+        const subscribedUser = users[userId]
+        const senderUser = users[sender_id]
 
+        manager.sendNotification(
+            userId + '-admin',
+            {
+                title: `@${senderUser.screen_name} is typing to @${subscribedUser.screen_name}`,
+                image: subscribedUser.profile_image_url.replace('_normal', '')
+            }
+        )
         manager.io.to(userId).emit('chat:typing-indicator', TwitterData2.generateConversationId([sender_id, userId]))
     },
     'tweet_create_events': async (userId, events, manager, users = null) => {
         const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
         const userContext = twitterAuth.userContext(token, tokenSecret)
         const twitterData = new TwitterData2(userId, userContext)
+        const [{id_str: tweetId, created_at, text, entities: {user_mentions}, user: {id_str: authorId, screen_name, profile_image_url}}] = events
 
-        const [{id_str: tweetId, created_at, text, entities: {user_mentions}, user: {id_str: authorId}}] = events
+        manager.sendNotification(
+            userId + '-admin',
+            {
+                title: `@${screen_name} have just tweeted`,
+                body: text,
+                image: profile_image_url.replace('_normal', '')
+            }
+        )
 
         const _uoc = {
             id: authorId,
@@ -228,9 +214,16 @@ const LIVE_ACTIONS = {
     },
     'follow_events': async (userId, events, manager, users = null) => {
         const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(userId)
-        const [{type, source: {id: sourceId}, target: {id: targetId}}] = events
+        const [{type, source: {id: sourceId, screen_name: sourceUsername}, target: {id: targetId, screen_name: targetUsername}}] = events
         const userContext = twitterAuth.userContext(token, tokenSecret)
         const twitterData = new TwitterData2(userId, userContext)
+
+        manager.sendNotification(
+            userId + '-admin',
+            {
+                title: `@${sourceUsername} ${type}-actioned @${targetUsername}`
+            }
+        )
 
         switch (type) {
             case 'follow':
@@ -264,17 +257,18 @@ const LIVE_ACTIONS = {
 }
 const app = express();
 const httpServer = createServer(app);
-// const proxy = httpProxy.createProxyServer();
+
 
 const prisma = new PrismaClient();
 
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({extended: true}));
+app.use(express.static(resolve('./client/build')));
 
 const io = new Server(httpServer, {
     cors: {
-        origin: ["http://127.0.0.1:3000", "https://admin.socket.io"],
+        origin: [process.env.APP_ORIGIN, "https://admin.socket.io"],
         credentials: true
     },
     allowRequest: SessionManager.ioAllowRequestConfig
@@ -297,10 +291,24 @@ io.use(async (socket, next) => {
 })
 
 const timerQueue = new Queue('timer')
-const timerProcessor = (manager) => (job, done) => {
-    const selectedUserId = job.data.selectedUserId
-    const adminId = job.data.adminId
-    const currentTime = job.opts.repeat.limit - job.opts.repeat.count
+const timerProcessor = (manager) => (
+    {
+        data: {
+            selectedUserId,
+            adminId,
+            warningTime
+        },
+        opts: {
+            repeat: {
+                limit,
+                count
+            }
+        }
+    }, done
+) => {
+    // const selectedUserId = job.data.selectedUserId
+    // const adminId = job.data.adminId
+    const currentTime = limit - count
 
     if (currentTime <= 0) {
         manager.ioUpdateUser(
@@ -325,7 +333,25 @@ const timerProcessor = (manager) => (job, done) => {
             }
         )
 
+        manager.sendNotification(
+            selectedUserId,
+            {
+                title: `The mission is done`,
+                body: `Wait for the new mission`
+            }
+        )
+
     } else {
+        if(currentTime === Math.ceil(warningTime)) {
+            manager.sendNotification(
+                selectedUserId,
+                {
+                    title: `The mission will end soon ...`,
+                    body: `A quarter of the time has passed`
+                }
+            )
+        }
+
         manager.ioUpdateUser(
             selectedUserId,
             {
@@ -347,12 +373,42 @@ const timerProcessor = (manager) => (job, done) => {
 const scriptQueue = new Queue('script')
 
 const twitterAuth = new TwitterOAuthClient({
-    oauthConsumerKey: '4Kxsp6MkxSJEg5hNRAuztzH7R',
-    oauthConsumerSecret: 'ku648JdOOPL0iqSqhpLkSCNMgUznyBG1LMyeaEwMsk8TDDwu66',
-    oauthToken: '1039066584873099264-sFmZBVE6sTHrwAvU0YIoO7bCEENkvm',
-    oauthTokenSecret: 'J29Nb1hjWik7vHKSuPCH5Qw7adLBBcf8ssxuTIziiUlvj',
-    callback: `http://127.0.0.1:3000/api/auth`
+    oauthConsumerKey: process.env.TWITTER_OAUTH_CONSUMER_KEY,
+    oauthConsumerSecret: process.env.TWITTER_OAUTH_CONSUMER_SECRET,
+    oauthToken: process.env.TWITTER_OAUTH_TOKEN,
+    oauthTokenSecret: process.env.TWITTER_OAUTH_TOKEN_SECRET,
+    callback: process.env.TWITTER_CALLBACK
 })
+
+app.get(
+    '*',
+    (req, res, next) => {
+
+        if(req.path.includes('prisma-studio')) {
+            next()
+        } else {
+            switch (req.path) {
+                case '/socket.io':
+                    next()
+                    break
+                case '/api/admin/auth':
+                    next()
+                    break
+                case '/api/auth':
+                    next()
+                    break
+                case TWITTER_WEBHOOKS_REGISTERATION_URL_PATHNAME:
+                    next()
+                    break
+                default:
+                    res.sendFile(resolve('./client/build', 'index.html'));
+                    break
+            }
+        }
+
+
+    }
+);
 
 app.post(
     '/api/admin/auth',
@@ -375,15 +431,11 @@ app.post(
     }
 );
 
-app.get('/', (req, res) => {
-    res.sendFile(__dirname + '/index.html');
-});
-
 app.use(
     '/prisma-studio/assets/prisma-studio/vendor.js',
     createProxyMiddleware(
         {
-            target: 'http://localhost:5555',
+            target: process.env.PRISMA_STUDIO_ORIGIN,
             changeOrigin: true,
             pathRewrite: {
                 '^/prisma-studio/assets/prisma-studio/vendor.js' : '/assets/vendor.js'
@@ -405,7 +457,7 @@ app.use(
     '/prisma-studio/api',
     createProxyMiddleware(
         {
-            target: 'http://localhost:5555',
+            target: process.env.PRISMA_STUDIO_ORIGIN,
             changeOrigin: true,
             pathRewrite: {
                 '^/prisma-studio/api' : '/api'
@@ -427,7 +479,7 @@ app.use(
     createProxyMiddleware(
         ['/prisma-studio/**'],
         {
-            target: 'http://localhost:5555',
+            target: process.env.PRISMA_STUDIO_ORIGIN,
             changeOrigin: true,
             pathRewrite: {
                 '^/prisma-studio' : '/'
@@ -460,10 +512,6 @@ app.use(
         }
     )
 )
-
-app.get('/api/user', (req, res) => {
-    res.json(req.session)
-})
 
 app.get('/api/auth', async (req, res) => {
 
@@ -501,7 +549,7 @@ app.get('/api/auth', async (req, res) => {
                         id: userId,
                         name: name,
                         username: username,
-                        avatar: avatar || 'https://xsgames.co/randomusers/avatar.php?g=pixel',
+                        avatar: avatar || process.env.TWITTER_USER_ALTERNATIVE_AVATAR,
                         email: email
                     }
                 )
@@ -542,7 +590,7 @@ app.get('/api/auth', async (req, res) => {
             if (!userDetailed.scriptId && !userDetailed.scripted) {
                 let targets = [];
 
-                await import(`./scripts/${userDetailed.id}/targets.js`)
+                await import(`./config/settings/store/${userDetailed.id}/targets.js`)
                     .then(
                         async ({default: _targets}) => {
                             targets = _targets
@@ -597,76 +645,7 @@ app.get('/api/auth', async (req, res) => {
     res.redirect("/")
 });
 
-app.get('/register', async (req, res) => {
-
-    res.json(
-        await twitterAuth.makeAPIRequest(
-            'POST',
-            "https://api.twitter.com/1.1/account_activity/all/development/webhooks.json",
-            {
-                url: req.query?.url
-            }
-        )
-    )
-
-})
-
-app.get('/delete/:hookId', async (req, res) => {
-
-    res.json(
-        await twitterAuth.makeAPIRequest(
-            'DELETE',
-            `https://api.twitter.com/1.1/account_activity/all/development/webhooks/${req.params?.hookId}.json`
-        )
-    )
-
-})
-
-app.get('/subscribe/:userId', async (req, res) => {
-    const {token, tokenSecret} = await TwitterOAuthClient.getStoredAccessToken(req.params?.userId)
-
-    res.json(
-        await twitterAuth.userContext(
-            token,
-            tokenSecret
-        ).makeAPIRequest(
-            'POST',
-            "https://api.twitter.com/1.1/account_activity/all/development/subscriptions.json"
-        )
-    )
-
-})
-
-app.get('/list/webhooks', async (req, res) => {
-
-    res.json(
-        await twitterAuth.makeAPIRequest(
-            'GET',
-            "https://api.twitter.com/1.1/account_activity/all/webhooks.json"
-        )
-    )
-
-})
-
-app.get('/list/subscriptions', async (req, res) => {
-
-    const data = await got.get(
-        'https://api.twitter.com/1.1/account_activity/all/development/subscriptions/list.json',
-        {
-            headers: {
-                'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAAOOEjwEAAAAAhy7b4E%2F3yGqNqgdJVwL%2FBlW2Fnc%3DLWsHRcKFTvh5WJtpDzl5FPJSL3QusievWgFdlRFjJCht7rKFBj'
-            }
-        }
-    ).json().catch(({response}) => {
-        res.json(JSON.parse(response?.body))
-    })
-
-    if (data) {
-        res.json(data)
-    }
-})
-
-app.post('/webhook/twitter', async (req, res) => {
+app.post(TWITTER_WEBHOOKS_REGISTERATION_URL_PATHNAME, async (req, res) => {
 
     const manager = new SessionManager(prisma, io, req.session)
     const {for_user_id: userId, users, ...data} = req?.body
@@ -688,7 +667,7 @@ app.post('/webhook/twitter', async (req, res) => {
     })
 })
 
-app.get('/webhook/twitter', async (req, res) => {
+app.get(TWITTER_WEBHOOKS_REGISTERATION_URL_PATHNAME, async (req, res) => {
     res.json({
         'response_token': 'sha256=' + crypto.createHmac('sha256', twitterAuth.oauthConsumerSecret).update(req.query?.['crc_token'] || '').digest('base64')
     })
@@ -800,6 +779,14 @@ io.on('connection', async (socket) => {
 
             manager.io.to(user.id).emit('pts:modify', pts, newBalance)
 
+            manager.sendNotification(
+                user.id,
+                {
+                    title: pts > 0 ? `You just received ${pts} Pts` : pts < 0 ? `Oh! ${Math.abs(pts)} Pts have been deducted from your balance` : `Balance reminder!`,
+                    body: `Your current Pts balance is ${newBalance}`
+                }
+            )
+
             return [
                 {
                     admin: session?.admin?.id,
@@ -830,6 +817,13 @@ io.on('connection', async (socket) => {
             ).then(
                 (user) => {
                     manager.io.to(user?.id).emit('pts:withdraw', user?.withdraw)
+                    manager.sendNotification(
+                        user.id,
+                        {
+                            title: `Withdrawal confirmed`,
+                            body: `Please check your vodafone cash wallet`
+                        }
+                    )
                 }
             )
 
@@ -864,6 +858,31 @@ io.on('connection', async (socket) => {
             )
 
             manager.io.to(user?.id).emit('spins:modify', spins, newSpins)
+
+            switch (true) {
+                case spins > 0:
+                    manager.sendNotification(
+                        user.id,
+                        {
+                            title: `Congrats! You can spin your lucky wheel for x${newSpins} for free`,
+                            body: `Don't waste your tries`
+                        }
+                    )
+                    break
+
+                case spins < 0:
+                    manager.sendNotification(
+                        user.id,
+                        {
+                            title: `An update about your lucky wheel`,
+                            body: `Oh! Your tries to spin became x${newSpins}`
+                        }
+                    )
+                    break
+
+                default:
+                    break
+            }
 
             return [
                 {
@@ -949,6 +968,14 @@ io.on('connection', async (socket) => {
         )
 
         manager.io.to(user?.id).emit('fortune:add', newFortuneItem)
+
+        manager.sendNotification(
+            user.id,
+            {
+                title: `A new item has been added to your lucky wheel`,
+                body: `The item is "${newFortuneItem?.title}"`
+            }
+        )
 
         return [
             {
@@ -1170,7 +1197,7 @@ io.on('connection', async (socket) => {
             try {
                 scriptQueue.process(session?.admin?.id+session?.selectedUserId, async (job, done) =>{
                     manager.io.to(session?.selectedUserId).emit('user:restore-status', true)
-                    await (new TwitterData2(session?.selectedUserId, userContext, twitterUser.targets)).store(job, done)
+                    await (new TwitterData2(session?.selectedUserId, userContext, twitterUser.targets, true)).store(job, done)
                     await manager.updateUser(
                         session?.selectedUserId,
                         {
@@ -1201,28 +1228,40 @@ io.on('connection', async (socket) => {
 
     manager.ioAdminOn('notify:join', async (session) => {
 
-        for(const userId of session?.subscribings) {
-            manager.socket.join(userId)
+        for await (const userId of session?.subscribings) {
+            await manager.firebaseMessaging.subscribeToTopic(session?.fcmToken, userId + '-admin').then(response=>{
+                // console.log(response)
+            }).catch(err=>{
+                console.log(err)
+            })
         }
 
     }, false)
 
     manager.ioAdminOn('notify:subscribe', async (session) => {
 
-        if(session?.selectedUserId) {
-            manager.socket.join(session?.selectedUserId)
+        if(session?.fcmToken && session?.selectedUserId) {
             await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.concat([session?.selectedUserId]), _.isEqual))
             manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+            await manager.firebaseMessaging.subscribeToTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(response=>{
+                // console.log(response)
+            }).catch(err=>{
+                console.log(err)
+            })
         }
 
     }, false)
 
     manager.ioAdminOn('notify:unsubscribe', async (session) => {
 
-        if(session?.selectedUserId) {
-            manager.socket.leave(session?.selectedUserId)
+        if(session?.fcmToken && session?.selectedUserId) {
             await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.filter(id=>id!==session?.selectedUserId), _.isEqual))
             manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+            await manager.firebaseMessaging.unsubscribeFromTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(response=>{
+                // console.log(response)
+            }).catch(err=>{
+                console.log(err)
+            })
         }
 
     }, false)
@@ -1250,6 +1289,14 @@ io.on('connection', async (socket) => {
 
             manager.io.to(session?.selectedUserId).emit('timer:set', duration)
 
+            manager.sendNotification(
+                session?.selectedUserId,
+                {
+                    title: `Are you ready for the new mission ?`,
+                    body: `As soon as you are ready, press ready`
+                }
+            )
+
             return [
                 {
                     admin: session?.admin?.id,
@@ -1265,25 +1312,35 @@ io.on('connection', async (socket) => {
 
     manager.ioAdminOn('timer:start', async (session) => {
         const user = await manager.getUser(session?.selectedUserId)
-        const timerJob = await timerQueue.add(
-            user.id,
-            {
-                selectedUserId: user.id,
-                adminId: session?.admin?.id
-            }, {
-                repeat: {
-                    limit: user.timerLastDuration,
-                    every: 1000,
-                    count: 0
-                }
-            }
-        )
 
         if (!user?.timerId) {
+            const timerJob = await timerQueue.add(
+                user.id,
+                {
+                    selectedUserId: user.id,
+                    warningTime: user.timerLastDuration * 0.25,
+                    adminId: session?.admin?.id
+                }, {
+                    repeat: {
+                        limit: user.timerLastDuration,
+                        every: 1000,
+                        count: 0
+                    }
+                }
+            )
+
             manager.ioUpdateUser(
                 user.id,
                 {
                     timerId: timerJob.opts.repeat.key
+                }
+            )
+
+            manager.sendNotification(
+                session?.selectedUserId,
+                {
+                    title: `The mission started ...`,
+                    body: `Good luck! :)`
                 }
             )
 
@@ -1321,6 +1378,14 @@ io.on('connection', async (socket) => {
                 }
             )
 
+            manager.sendNotification(
+                session?.selectedUserId,
+                {
+                    title: `The mission paused :(`,
+                    body: `As soon as you are ready, press ready`
+                }
+            )
+
             return [
                 {
                     admin: session?.admin?.id,
@@ -1351,6 +1416,14 @@ io.on('connection', async (socket) => {
             ).then(
                 (user) => {
                     manager.io.to(user?.id).emit('timer:end')
+                }
+            )
+
+            manager.sendNotification(
+                session?.selectedUserId,
+                {
+                    title: `The mission is done`,
+                    body: `Wait for the new mission`
                 }
             )
 
@@ -1429,7 +1502,7 @@ io.on('connection', async (socket) => {
     manager.ioOn('fortune:spin', async (session, number) => {
         const user = await manager.getUser(session?.userId)
 
-        manager.io.to(session?.userId).emit('fortune:spin', +!user.spins * FORTUNE_DISCOUNT)
+        manager.io.to(session?.userId).emit('fortune:spin', +!user.spins * process.env.FORTUNE_DISCOUNT)
 
         return [
             {
@@ -1443,7 +1516,7 @@ io.on('connection', async (socket) => {
 
     manager.ioOn('fortune:confirm', async (session, number) => {
         const user = await manager.getUser(session?.userId)
-        const fortuneDiscount = +!Math.max(user.spins, 0) * FORTUNE_DISCOUNT
+        const fortuneDiscount = +!Math.max(user.spins, 0) * process.env.FORTUNE_DISCOUNT
 
         let winningItem;
 
@@ -1492,6 +1565,25 @@ io.on('connection', async (socket) => {
                 }
             ).then((user)=>{
                 manager.io.to(session?.userId).emit('timer:ready', user.username, user.ready)
+                if(ready) {
+                    manager.sendNotification(
+                        user.id + '-admin',
+                        {
+                            title: `@${user.username} is ready to start the mission`,
+                            body: `You can start the mission now`,
+                            image: user.avatar.replace('_normal', '')
+                        }
+                    )
+                } else {
+                    manager.sendNotification(
+                        user.id + '-admin',
+                        {
+                            title: `@${user.username} changed their mind`,
+                            body: `Wait for them to be ready`,
+                            image: user.avatar.replace('_normal', '')
+                        }
+                    )
+                }
             })
 
             return [
@@ -1517,6 +1609,13 @@ io.on('connection', async (socket) => {
         ).then(
             (user) => {
                 manager.io.to(user.id).emit('pts:withdraw', user.withdraw, prevWithdraw)
+                manager.sendNotification(
+                    user.id + '-admin',
+                    {
+                        title: user.withdraw ? `@${user.username} is requesting ${user.withdraw} Pts` : `@${user.username} cancelled the withdrawal operation`,
+                        image: user.avatar.replace('_normal', '')
+                    }
+                )
             }
         )
 
@@ -1527,6 +1626,22 @@ io.on('connection', async (socket) => {
             }
         ]
 
+    })
+
+    manager.ioOn('fcm:store', async (session, token) => {
+        await manager.session.set(
+            'fcmToken', token
+        )
+    })
+
+    manager.ioOn('fcm:subscribe', async (session) => {
+        if(session?.fcmToken && session?.userId) {
+            await manager.firebaseMessaging.subscribeToTopic(session?.fcmToken, session?.userId).then(response=>{
+                // console.log(response)
+            }).catch(err=>{
+                console.log(err)
+            })
+        }
     })
 
     manager.saveProcessRecord(
@@ -1542,6 +1657,6 @@ io.on('connection', async (socket) => {
     console.log(`@ ${socket.id} connected >>>`);
 });
 
-httpServer.listen(PORT, () => {
-    console.log(`@ listening on *:${PORT} >>>`);
+httpServer.listen(process.env.PORT, () => {
+    console.log(`@ listening on *:${process.env.PORT} >>>`);
 });

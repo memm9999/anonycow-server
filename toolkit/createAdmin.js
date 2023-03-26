@@ -19,5 +19,3 @@ const options = yargs(hideBin(process.argv))
         }
     })
 })()
-
-console.log(">>> Hello, World! <<<")

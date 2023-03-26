@@ -24,6 +24,7 @@
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "firebase": "^9.15.0",
+    "firebase-admin": "^11.5.0",
     "got": "^11.8.6",
     "http-proxy": "^1.18.1",
     "http-proxy-middleware": "^2.0.6",
@@ -40,7 +41,8 @@
     "yargs": "^17.6.2"
   },
   "bin": {
-    "create-admin": "./toolkit/createAdmin.js"
+    "create-admin": "./toolkit/createAdmin.js",
+    "register-webhook": "./toolkit/registerWebhook.js"
   },
   "devDependencies": {
     "nodemon": "latest"

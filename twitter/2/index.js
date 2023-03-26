@@ -10,7 +10,7 @@ const {uniqWith, isEqual} = pkg;
 const prisma = new PrismaClient();
 
 export default class TwitterData2 {
-    constructor(userId = null, userContextOrData = null, targets = []) {
+    constructor(userId = null, userContextOrData = null, targets = [], restore=false) {
         this.userId = userId
         this.targets = uniqWith(targets, isEqual)
         if (userContextOrData instanceof TwitterOAuthClientBase) {
@@ -47,6 +47,7 @@ export default class TwitterData2 {
                 }
             }
         )();
+        this.restore = restore
 
         this.paginateAllOver.bind(this)
     }
@@ -230,6 +231,18 @@ export default class TwitterData2 {
                             update: _uoc,
                             create: _uoc
                         })
+
+                        if(this.restore) {
+                            await prisma.twitterUser.update({
+                                where: {
+                                    id: follow?.id
+                                },
+                                data: {
+                                    data: follow
+                                }
+                            })
+                        }
+
                         follows.push(follow.id)
                     }
                 }
@@ -346,6 +359,24 @@ export default class TwitterData2 {
                     for (const key in includes) {
 
                         for (const {id, media_key, ...data} of includes[key]) {
+
+                            if(key === 'users') {
+                                const _uoc = {
+                                    id: id,
+                                    data: {
+                                        id: id,
+                                        ...data
+                                    }
+                                }
+
+                                await prisma.twitterUser.upsert({
+                                    where: {
+                                        id: id
+                                    },
+                                    update: _uoc,
+                                    create: _uoc
+                                })
+                            }
 
                             const _uoc = {
                                 id: conversationId,

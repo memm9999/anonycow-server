@@ -4,8 +4,16 @@ import crypto from "crypto";
 import cookieParser from "cookie-parser"
 import session from "./session/middleware.js";
 import {serialize} from "cookie";
+import {initializeApp, applicationDefault} from 'firebase-admin/app';
+import {getMessaging} from "firebase-admin/messaging";
 
 export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready', 'fortuneOrder', 'totalProcesses']
+
+const firebaseApp = initializeApp({
+    credential: applicationDefault()
+})
+
+const firebaseMessaging = getMessaging(firebaseApp)
 
 export class SessionManager {
     constructor(prisma, io = undefined, attachment) {
@@ -20,6 +28,8 @@ export class SessionManager {
                 break;
         }
         this.io = io
+        this.firebaseApp = firebaseApp
+        this.firebaseMessaging = firebaseMessaging
 
         this.ioEventHandler.bind(this)
     }
@@ -49,6 +59,8 @@ export class SessionManager {
             "notify:subscribe",
             "notify:unsubscribe",
             "notify:list",
+            "fcm:store",
+            "fcm:subscribe",
             "vcn:add",
             "vcn:edit",
             "vcn:verify",
@@ -374,6 +386,28 @@ export class SessionManager {
 
     ioAdminOn = (action, handler, broadcastProcesses) => {
         this.socket.on(action, this.ioEventHandler(action, handler, true, broadcastProcesses))
+    }
+
+    sendNotification = (id, notification) => {
+        firebaseMessaging.send({
+            topic: id,
+            notification: notification,
+            webpush: {
+                fcmOptions: {
+                    link: process.env.APP_ORIGIN
+                },
+                notification: {
+                    ...notification,
+                    icon: './icon.png'
+                }
+            }
+        })
+        .then(messageId => {
+            // console.log(messageId)
+        })
+        .catch(err=>{
+            console.log(err)
+        })
     }
 
 }

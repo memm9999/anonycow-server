@@ -129,6 +129,7 @@ model Process {
 
 enum FortuneClass {
   T
+  B
   S
   J
   N

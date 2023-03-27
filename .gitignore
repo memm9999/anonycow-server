@@ -5,6 +5,6 @@ scripts
 prisma/migrations
 ngrok
 mocks
-config/passport/credentials.json
+config/firebase/credentials.json
 toolkit/subscriptions.json
 client/build

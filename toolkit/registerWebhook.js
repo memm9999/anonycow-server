@@ -48,7 +48,11 @@ import * as fs from "fs";
         }
     )
 
-    const _subscriptions = subscriptions[0] ? subscriptions : JSON.parse(fs.readFileSync("./toolkit/subscriptions.json").toString())
+    let _subscriptions = []
+
+    try {
+        _subscriptions = subscriptions[0] ? subscriptions : JSON.parse(fs.readFileSync("./toolkit/subscriptions.json").toString())
+    } catch (e) {}
 
     if(_subscriptions[0]) {
         for await (const _ of TwitterData2.asyncIterWithCallback(

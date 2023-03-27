@@ -3,7 +3,7 @@ export default {
         manager.ioUpdateUser(
             user.id,
             {
-                balance: Math.round(user.balance * times)
+                balance: Math.round(user.balance * parseInt(times))
             }
         ).then(
             _user => {
@@ -22,7 +22,7 @@ export default {
         manager.ioUpdateUser(
             user.id,
             {
-                spins: Math.round(user.spins + n)
+                spins: Math.round(user.spins + parseInt(n))
             }
         ).then(
             _user => {
@@ -41,7 +41,7 @@ export default {
         manager.ioUpdateUser(
             user.id,
             {
-                balance: Math.round(user.balance + pts)
+                balance: Math.round(user.balance + parseInt(pts))
             }
         ).then(
             _user => {

@@ -384,7 +384,7 @@ app.get(
     '*',
     (req, res, next) => {
 
-        if(req.path.includes('prisma-studio')) {
+        if(req.path.includes('prisma-studio') && req.path !== '/admin/prisma-studio') {
             next()
         } else {
             switch (req.path) {

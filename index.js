@@ -1107,7 +1107,7 @@ io.on('connection', async (socket) => {
 
         manager.io.to(manager.socket.id).emit('chat:list', data.map(
             (conversation) => {
-                const {userId, data} = conversation.dmConversation.participants[0] || {}
+                const {userId, id, data} = conversation.dmConversation.participants[0] || {}
 
                 if (data) {
                     const {username, name, profile_image_url} = data
@@ -1118,6 +1118,7 @@ io.on('connection', async (socket) => {
                         you: (conversation.senderId === session?.selectedUserId),
                         with: {
                             isPlayer: !!userId,
+                            id: id,
                             username: username,
                             name: name,
                             avatar: profile_image_url

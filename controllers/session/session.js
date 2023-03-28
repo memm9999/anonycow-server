@@ -4,7 +4,7 @@ import {sessionSchema} from "./scheme.js";
 // const client = new Client()
 // await client.open()
 const client = new Client()
-await client.open()
+await client.open(process.env.REDIS_STACK_URL)
 
 const sessionRepository = client.fetchRepository(sessionSchema)
 

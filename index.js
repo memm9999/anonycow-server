@@ -1,7 +1,6 @@
 import express from "express";
 import {createServer} from "http";
 import {Server} from "socket.io";
-import got from "got";
 import crypto from "crypto";
 import cors from "cors"
 import {instrument} from "@socket.io/admin-ui";
@@ -380,36 +379,6 @@ const twitterAuth = new TwitterOAuthClient({
     callback: process.env.TWITTER_CALLBACK
 })
 
-app.get(
-    '*',
-    (req, res, next) => {
-
-        if(req.path.includes('prisma-studio') && req.path !== '/admin/prisma-studio') {
-            next()
-        } else {
-            switch (req.path) {
-                case '/socket.io':
-                    next()
-                    break
-                case '/api/admin/auth':
-                    next()
-                    break
-                case '/api/auth':
-                    next()
-                    break
-                case TWITTER_WEBHOOKS_REGISTERATION_URL_PATHNAME:
-                    next()
-                    break
-                default:
-                    res.sendFile(resolve('./client/build', 'index.html'));
-                    break
-            }
-        }
-
-
-    }
-);
-
 app.post(
     '/api/admin/auth',
     (req, res, next) => {
@@ -447,8 +416,7 @@ app.use(
                     res.redirect("/admin/prisma-studio")
                 }
 
-            },
-            ws: true
+            }
         }
     )
 )
@@ -469,8 +437,7 @@ app.use(
                     res.redirect("/admin/prisma-studio")
                 }
 
-            },
-            ws: true
+            }
         }
     )
 )
@@ -484,7 +451,6 @@ app.use(
             pathRewrite: {
                 '^/prisma-studio' : '/'
             },
-            ws: true,
             onProxyReq: async (proxyReq, req, res) => {
                 const session = await req?.session?.get()
 
@@ -1657,6 +1623,13 @@ io.on('connection', async (socket) => {
 
     console.log(`@ ${socket.id} connected >>>`);
 });
+
+app.get(
+    '*',
+    (req, res) => {
+        res.sendFile(resolve('./client/build', 'index.html'))
+    }
+);
 
 httpServer.listen(process.env.PORT, () => {
     console.log(`@ listening on *:${process.env.PORT} >>>`);

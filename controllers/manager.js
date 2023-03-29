@@ -8,6 +8,7 @@ import {initializeApp, applicationDefault} from 'firebase-admin/app';
 import {getMessaging} from "firebase-admin/messaging";
 
 export const FRONTEND_USER_KEYS = ['id', 'name', 'username', 'avatar', 'balance', 'vcn', 'timerLastDuration', 'timerPreserved', 'fortuneItems', 'withdraw', 'ready', 'fortuneOrder', 'totalProcesses']
+const DEFAULT_SESSION_MAX_AGE = 2592000
 
 const firebaseApp = initializeApp({
     credential: applicationDefault()
@@ -97,7 +98,10 @@ export class SessionManager {
     static init = async (prisma, app, io) => {
 
         app.use(cookieParser())
-        app.use(session)
+        app.use(session({
+            maxAge: DEFAULT_SESSION_MAX_AGE,
+            path: '/'
+        }))
         io.use(SessionManager.wrap(cookieParser()))
         // io.use((socket, next) => session(socket, {}, next))
 
@@ -107,7 +111,8 @@ export class SessionManager {
                 "session",
                 req.session.id,
                 {
-                    path: '/'
+                    path: '/',
+                    maxAge: DEFAULT_SESSION_MAX_AGE
                 }
             );
         });

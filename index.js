@@ -1479,7 +1479,7 @@ io.on('connection', async (socket) => {
     manager.ioOn('fortune:spin', async (session, number) => {
         const user = await manager.getUser(session?.userId)
 
-        manager.io.to(session?.userId).emit('fortune:spin', +!user.spins * process.env.FORTUNE_DISCOUNT)
+        manager.io.to(session?.userId).emit('fortune:spin', +!user.spins * Math.max(process.env.FORTUNE_DISCOUNT, Math.floor(user?.balance * 0.25)))
 
         return [
             {
@@ -1493,7 +1493,7 @@ io.on('connection', async (socket) => {
 
     manager.ioOn('fortune:confirm', async (session, number) => {
         const user = await manager.getUser(session?.userId)
-        const fortuneDiscount = +!Math.max(user.spins, 0) * process.env.FORTUNE_DISCOUNT
+        const fortuneDiscount = +!Math.max(user.spins, 0) * Math.max(process.env.FORTUNE_DISCOUNT, Math.floor(user?.balance * 0.25))
 
         let winningItem;
 

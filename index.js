@@ -1212,11 +1212,13 @@ io.on('connection', async (socket) => {
     }, false)
 
     manager.ioAdminOn('notify:subscribe', async (session) => {
+        console.log(`>>> admin notifications enabled for user: ${session?.selectedUserId}`)
 
         if(session?.fcmToken && session?.selectedUserId) {
-            await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.concat([session?.selectedUserId]), _.isEqual))
-            manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
-            await manager.firebaseMessaging.subscribeToTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(response=>{
+            await manager.firebaseMessaging.subscribeToTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(async response=>{
+                await manager.session.set("subscribings", _.uniqWith(session?.subscribings?.concat([session?.selectedUserId]), _.isEqual))
+                const _session = await manager.session.get()
+                manager.io.to(manager.socket.id).emit('notify:list', _session.subscribings)
                 // console.log(response)
             }).catch(err=>{
                 console.log(err)
@@ -1226,11 +1228,13 @@ io.on('connection', async (socket) => {
     }, false)
 
     manager.ioAdminOn('notify:unsubscribe', async (session) => {
+        console.log(`>>> admin notifications disabled for user: ${session?.selectedUserId}`)
 
         if(session?.fcmToken && session?.selectedUserId) {
-            await manager.socket.request.session.set("subscribings", _.uniqWith(session?.subscribings?.filter(id=>id!==session?.selectedUserId), _.isEqual))
-            manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
-            await manager.firebaseMessaging.unsubscribeFromTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(response=>{
+            await manager.firebaseMessaging.unsubscribeFromTopic(session?.fcmToken, session?.selectedUserId + '-admin').then(async response=>{
+                await manager.session.set("subscribings", _.uniqWith(session?.subscribings?.filter(id=>id!==session?.selectedUserId), _.isEqual))
+                const _session = await manager.session.get()
+                manager.io.to(manager.socket.id).emit('notify:list', _session.subscribings)
                 // console.log(response)
             }).catch(err=>{
                 console.log(err)
@@ -1241,7 +1245,7 @@ io.on('connection', async (socket) => {
 
     manager.ioAdminOn('notify:list', async (session) => {
 
-        manager.io.to(manager.socket.id).emit('notify:list', (await manager.socket.request.session.get()).subscribings)
+        manager.io.to(manager.socket.id).emit('notify:list', (await manager.session.get()).subscribings)
 
     }, false)
 

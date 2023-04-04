@@ -289,7 +289,10 @@ io.use(async (socket, next) => {
     next()
 })
 
-const timerQueue = new Queue('timer')
+const timerQueue = new Queue(
+    'timer',
+    process.env.REDIS_STACK_URL_JOBS
+)
 const timerProcessor = (manager) => (
     {
         data: {
@@ -369,7 +372,10 @@ const timerProcessor = (manager) => (
     done()
 }
 
-const scriptQueue = new Queue('script')
+const scriptQueue = new Queue(
+    'script',
+    process.env.REDIS_STACK_URL_JOBS
+)
 
 const twitterAuth = new TwitterOAuthClient({
     oauthConsumerKey: process.env.TWITTER_OAUTH_CONSUMER_KEY,
